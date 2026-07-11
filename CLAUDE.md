@@ -33,6 +33,7 @@ A daily grooming agent for Vijay's work (Fira) Trello board. It deduplicates and
 
 ## Process
 - PDLC: `docs/config.md` and `docs/testing.md` are locked before implementation. Config structure changes mid-build require explicit approval.
+- When any behavioral default changes (in `agent_config.json` or `docs/config.md`: caps, thresholds, batch sizes, timing windows), also update the "How it works: the agent's decision logic" toggle on the Notion spine page (`Trello Grooming Agent Spine`, page ID `3966c55b25638155a69dfdb1421d5d3e`) so its plain-language numbers match. The JSON on disk is authoritative; the Notion toggle is a human-readable snapshot and must never be allowed to drift. If you cannot access Notion in the current session, state that explicitly and list the exact edits needed so Vijay can apply them.
 - Every bug fix gets a root-cause entry in `LESSONS.md` in the same commit.
 - Before declaring any task complete: run the full pytest suite, fix all failures yourself, and re-run until green. Do not report back with failing tests or ask Vijay to relay errors.
 - Keep docs in `docs/` current with any approved change (design, config, testing).

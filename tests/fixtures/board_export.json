@@ -1,0 +1,105 @@
+{
+  "id": "board_fira",
+  "shortLink": "RwdXsia3",
+  "lists": [
+    { "id": "L_today", "name": "Today", "closed": false, "pos": 1 },
+    { "id": "L_inbox", "name": "Inbox / Triage", "closed": false, "pos": 2 },
+    { "id": "L_nfd", "name": "Next Few Days", "closed": false, "pos": 3 },
+    { "id": "L_week", "name": "This Week", "closed": false, "pos": 4 },
+    { "id": "L_quar", "name": "Agent: Merged/Removed", "closed": false, "pos": 5 },
+    { "id": "L_s71", "name": "Scratch 7-1", "closed": false, "pos": 6 },
+    { "id": "L_s624", "name": "Scratch 6-24", "closed": false, "pos": 7 },
+    { "id": "L_s63", "name": "Scratch 6-3", "closed": false, "pos": 8 },
+    { "id": "L_arch512", "name": "ARCHIVE Scratch 5-12", "closed": false, "pos": 9 },
+    { "id": "L_april", "name": "Archive - April 12", "closed": false, "pos": 10 }
+  ],
+  "labels": [
+    { "id": "LB_t", "name": "1. Today (must do)", "color": "red" },
+    { "id": "LB_n", "name": "2. Next Few Days (must do)", "color": "orange" },
+    { "id": "LB_w", "name": "3. This Week (must do)", "color": "yellow" },
+    { "id": "LB_auto", "name": "Agent: Auto-Updated", "color": "green" },
+    { "id": "LB_prop", "name": "Agent: Proposed", "color": "purple" },
+    { "id": "LB_colin", "name": "Colin", "color": "blue" },
+    { "id": "LB_logan", "name": "Logan", "color": "sky" },
+    { "id": "LB_dana", "name": "Dana", "color": "lime" }
+  ],
+  "cards": [
+    { "id": "report_card", "idList": "L_today", "name": "Grooming Report", "desc": "prev report", "due": null, "dateLastActivity": "2026-07-11T06:30:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/report", "closed": false },
+
+    { "id": "dup_exact_a", "idList": "L_today", "name": "Send RSM comp plan to Colin", "desc": "Need to send the RSM comp plan draft.", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_colin"], "labels": [{"name": "Colin"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/exacta", "closed": false },
+    { "id": "dup_exact_b", "idList": "L_inbox", "name": "Send RSM comp plan to Colin", "desc": "RSM comp plan for Colin, v2 with the latest numbers and context.", "due": null, "dateLastActivity": "2026-06-25T12:00:00.000Z", "idLabels": ["LB_colin"], "labels": [{"name": "Colin"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/exactb", "closed": false },
+
+    { "id": "dup_near_a", "idList": "L_today", "name": "Update Sales Hub collateral", "desc": "Refresh the Sales Hub collateral.", "due": null, "dateLastActivity": "2026-06-21T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/neara", "closed": false },
+    { "id": "dup_near_b", "idList": "L_nfd", "name": "Update Sales Hub colateral", "desc": "Sales Hub collateral typo variant.", "due": null, "dateLastActivity": "2026-06-22T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/nearb", "closed": false },
+
+    { "id": "dup_person_a", "idList": "L_today", "name": "Review Forge rollout", "desc": "Forge rollout review.", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_colin"], "labels": [{"name": "Colin"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pa", "closed": false },
+    { "id": "dup_person_b", "idList": "L_nfd", "name": "Review Forge rollout", "desc": "Forge rollout review, second copy.", "due": null, "dateLastActivity": "2026-06-21T12:00:00.000Z", "idLabels": ["LB_logan"], "labels": [{"name": "Logan"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pb", "closed": false },
+
+    { "id": "dup_due_a", "idList": "L_today", "name": "Prep Q3 forecast deck", "desc": "Q3 forecast deck prep.", "due": "2026-07-20T00:00:00.000Z", "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_dana"], "labels": [{"name": "Dana"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/da", "closed": false },
+    { "id": "dup_due_b", "idList": "L_nfd", "name": "Prep Q3 forecast deck", "desc": "Q3 forecast deck prep, second copy.", "due": "2026-07-25T00:00:00.000Z", "dateLastActivity": "2026-06-21T12:00:00.000Z", "idLabels": ["LB_dana"], "labels": [{"name": "Dana"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/db", "closed": false },
+
+    { "id": "dup_scratch_active", "idList": "L_today", "name": "Adaptive Connect integration test", "desc": "short note", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/aca", "closed": false },
+    { "id": "dup_scratch_src", "idList": "L_s624", "name": "Adaptive Connect integration test", "desc": "Detailed rich context about the Adaptive Connect integration test plan, environments, and owners.", "due": null, "dateLastActivity": "2026-06-24T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/acsrc", "closed": false },
+
+    { "id": "dup_attach_a", "idList": "L_today", "name": "Weekend referral strategy notes", "desc": "Referral strategy notes.", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/wra", "closed": false },
+    { "id": "dup_attach_b", "idList": "L_nfd", "name": "Weekend referral strategy notes", "desc": "Referral strategy notes, has a file.", "due": null, "dateLastActivity": "2026-06-21T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 2, "checkItems": 0}, "shortUrl": "http://trello/wrb", "closed": false },
+
+    { "id": "dup_check_a", "idList": "L_today", "name": "Onboarding checklist for new hire", "desc": "Onboarding checklist.", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/oca", "closed": false },
+    { "id": "dup_check_b", "idList": "L_nfd", "name": "Onboarding checklist for new hire", "desc": "Onboarding checklist, second copy.", "due": null, "dateLastActivity": "2026-06-21T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 3}, "shortUrl": "http://trello/ocb", "closed": false },
+
+    { "id": "rel_a", "idList": "L_today", "name": "AdmitHub rollout phase 1", "desc": "Phase 1 tasks.", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/rela", "closed": false },
+    { "id": "rel_b", "idList": "L_nfd", "name": "AdmitHub rollout phase 2", "desc": "Phase 2 tasks.", "due": null, "dateLastActivity": "2026-06-21T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/relb", "closed": false },
+
+    { "id": "dead_due", "idList": "L_today", "name": "Follow up with payer", "desc": "Payer follow up.", "due": "2026-06-01T00:00:00.000Z", "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/dead", "closed": false },
+    { "id": "live_due", "idList": "L_today", "name": "Confirm focus group time", "desc": "Focus group scheduling.", "due": "2026-07-05T00:00:00.000Z", "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/live", "closed": false },
+
+    { "id": "stale_label", "idList": "L_nfd", "name": "Draft dashboard spec", "desc": "Dashboard spec.", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": ["LB_t"], "labels": [{"name": "1. Today (must do)"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/stale", "closed": false },
+    { "id": "fresh_label", "idList": "L_nfd", "name": "Fresh dashboard tweak", "desc": "Dashboard tweak.", "due": null, "dateLastActivity": "2026-07-08T12:00:00.000Z", "idLabels": ["LB_t"], "labels": [{"name": "1. Today (must do)"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/fresh", "closed": false },
+
+    { "id": "name_pipe", "idList": "L_today", "name": "Call Dana | prep agenda | send notes", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_dana"], "labels": [{"name": "Dana"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pipe", "closed": false },
+    { "id": "name_short", "idList": "L_today", "name": "Fix", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/short", "closed": false },
+    { "id": "name_long", "idList": "L_today", "name": "This is an extremely long card name that goes well past one hundred characters in order to trip the maximum length heuristic here", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/long", "closed": false },
+    { "id": "name_lower", "idList": "L_today", "name": "review the intake escalation queue", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/lower", "closed": false },
+    { "id": "name_double", "idList": "L_today", "name": "Send  the deck", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/double", "closed": false },
+    { "id": "name_ws", "idList": "L_today", "name": " Trailing space task ", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/ws", "closed": false },
+    { "id": "name_clean", "idList": "L_today", "name": "Review RSM comp with Colin", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_colin"], "labels": [{"name": "Colin"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/clean", "closed": false },
+
+    { "id": "wide_ep_active", "idList": "L_today", "name": "Colin sync on comp", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_colin"], "labels": [{"name": "Colin"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/epa", "closed": false },
+    { "id": "wide_ep_scratch", "idList": "L_s624", "name": "comp plan discussion Colin numbers timeline items", "desc": "", "due": null, "dateLastActivity": "2026-06-24T12:00:00.000Z", "idLabels": ["LB_colin"], "labels": [{"name": "Colin"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/eps", "closed": false },
+
+    { "id": "wide_eo_active", "idList": "L_today", "name": "comp review", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/eoa", "closed": false },
+    { "id": "wide_eo_scratch", "idList": "L_s624", "name": "comp plan far away unrelated", "desc": "", "due": null, "dateLastActivity": "2026-06-24T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/eos", "closed": false },
+
+    { "id": "wide_neg_active", "idList": "L_today", "name": "Unrelated task alpha", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/nega", "closed": false },
+    { "id": "wide_neg_scratch", "idList": "L_s624", "name": "Totally different beta", "desc": "", "due": null, "dateLastActivity": "2026-06-24T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/negs", "closed": false },
+
+    { "id": "recent_edit", "idList": "L_today", "name": "recently edited card", "desc": "", "due": null, "dateLastActivity": "2026-07-11T09:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/recent", "closed": false },
+
+    { "id": "proposed_card", "idList": "L_today", "name": "Proposed merge candidate", "desc": "", "due": null, "dateLastActivity": "2026-06-20T12:00:00.000Z", "idLabels": ["LB_prop"], "labels": [{"name": "Agent: Proposed"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/proposed", "closed": false },
+
+    { "id": "prop_yes", "idList": "L_today", "name": "Proposal awaiting yes", "desc": "", "due": null, "dateLastActivity": "2026-07-10T12:00:00.000Z", "idLabels": ["LB_prop"], "labels": [{"name": "Agent: Proposed"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pyes", "closed": false },
+    { "id": "prop_no", "idList": "L_today", "name": "Proposal awaiting no", "desc": "", "due": null, "dateLastActivity": "2026-07-10T12:00:00.000Z", "idLabels": ["LB_prop"], "labels": [{"name": "Agent: Proposed"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pno", "closed": false },
+
+    { "id": "auto_edited", "idList": "L_today", "name": "User changed this name", "desc": "user body", "due": null, "dateLastActivity": "2026-07-11T05:00:00.000Z", "idLabels": ["LB_auto"], "labels": [{"name": "Agent: Auto-Updated"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/autoedit", "closed": false },
+    { "id": "auto_old", "idList": "L_today", "name": "Old auto card", "desc": "body", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": ["LB_auto"], "labels": [{"name": "Agent: Auto-Updated"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/autoold", "closed": false },
+    { "id": "auto_fresh", "idList": "L_today", "name": "Fresh auto card", "desc": "body", "due": null, "dateLastActivity": "2026-07-06T12:00:00.000Z", "idLabels": ["LB_auto"], "labels": [{"name": "Agent: Auto-Updated"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/autofresh", "closed": false },
+
+    { "id": "quar_old", "idList": "L_quar", "name": "Quarantined old", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/quarold", "closed": false },
+    { "id": "quar_new", "idList": "L_quar", "name": "Quarantined recent", "desc": "", "due": null, "dateLastActivity": "2026-07-08T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/quarnew", "closed": false },
+    { "id": "quar_pullback", "idList": "L_today", "name": "Pulled back from quarantine", "desc": "", "due": null, "dateLastActivity": "2026-07-10T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pull", "closed": false },
+
+    { "id": "rec_s71_1", "idList": "L_s71", "name": "Sales Summit wrap-up note", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r711", "closed": false },
+    { "id": "rec_s71_2", "idList": "L_s71", "name": "Adaptive Connect follow up", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r712", "closed": false },
+    { "id": "rec_s71_3", "idList": "L_s71", "name": "Forge cleanup task", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r713", "closed": false },
+    { "id": "rec_s71_4", "idList": "L_s71", "name": "Q3 objective recheck", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r714", "closed": false },
+    { "id": "rec_s624_1", "idList": "L_s624", "name": "Old collateral idea", "desc": "", "due": null, "dateLastActivity": "2026-06-24T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r6241", "closed": false },
+    { "id": "rec_s63_1", "idList": "L_s63", "name": "Ancient onboarding doc", "desc": "", "due": null, "dateLastActivity": "2026-06-03T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r631", "closed": false },
+    { "id": "rec_arch_excluded", "idList": "L_arch512", "name": "Excluded scratch card", "desc": "", "due": null, "dateLastActivity": "2026-05-12T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/rexcl", "closed": false },
+    { "id": "rec_april_excluded", "idList": "L_april", "name": "April archive card", "desc": "", "due": null, "dateLastActivity": "2026-04-12T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/rapr", "closed": false }
+  ],
+  "comments": [
+    { "id": "cm_yes", "idCard": "prop_yes", "text": "yes", "date": "2026-07-11T08:00:00.000Z", "memberName": "Vijay" },
+    { "id": "cm_no", "idCard": "prop_no", "text": "no", "date": "2026-07-11T08:00:00.000Z", "memberName": "Vijay" },
+    { "id": "cm_unrelated", "idCard": "proposed_card", "text": "thanks, will look later", "date": "2026-07-11T08:00:00.000Z", "memberName": "Vijay" }
+  ]
+}

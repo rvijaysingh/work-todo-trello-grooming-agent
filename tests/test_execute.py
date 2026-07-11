@@ -1,0 +1,155 @@
+"""Sections 5 & 6 (execution) — caps, merge invariant, never-touch, rejection ledger."""
+
+from unittest.mock import MagicMock
+
+import guardrails
+import storage
+from phases import execute as ex
+
+NOW_ISO = "2026-07-11T13:00:00+00:00"
+
+
+def _mut(dry=True):
+    return ex.BoardMutator(MagicMock(), dry_run=dry)
+
+
+def _ops(mutator, op):
+    return [e for e in mutator.log if e["op"] == op]
+
+
+def _dup_verdict(a, b, survivor):
+    return {"relation": "duplicate", "cluster_ids": [a, b], "survivor_id": survivor,
+            "new_name": None, "exact_or_near_name_match": True, "llm_tier": 1}
+
+
+# ── Merges ─────────────────────────────────────────────────────────────────
+
+def test_merge_moves_loser_to_quarantine_not_archive(board, settings, db_path, now_utc):
+    mut = _mut()
+    result = ex.ExecutionResult()
+    ex.execute_merges(db_path, mut, board, [_dup_verdict("dup_exact_a", "dup_exact_b", "dup_exact_b")],
+                      settings, now_utc, NOW_ISO, result)
+    quar = board.list_by_name(settings.quarantine_list).id
+    moves = _ops(mut, "move_card")
+    assert any(m["card_id"] == "dup_exact_a" and m["target_list_id"] == quar for m in moves)
+    assert _ops(mut, "add_comment")
+    assert _ops(mut, "archive_card") == []  # loser quarantined, never archived
+
+
+def test_cap_max_merges_per_run_enforced(board, make_settings, db_path, now_utc):
+    settings = make_settings(max_merges_per_run=1)
+    mut = _mut()
+    result = ex.ExecutionResult()
+    verdicts = [_dup_verdict("dup_exact_a", "dup_exact_b", "dup_exact_b"),
+                _dup_verdict("dup_near_a", "dup_near_b", "dup_near_a")]
+    ex.execute_merges(db_path, mut, board, verdicts, settings, now_utc, NOW_ISO, result)
+    assert result.counters["merges"] == 1
+
+
+def test_merge_invariant_violation_blocks_move(board, settings, db_path, now_utc, monkeypatch):
+    monkeypatch.setattr(guardrails, "merge_contains_all_sources", lambda *a, **k: False)
+    mut = _mut()
+    result = ex.ExecutionResult()
+    ex.execute_merge(db_path, mut, board, _dup_verdict("dup_exact_a", "dup_exact_b", "dup_exact_b"),
+                     settings, NOW_ISO, result)
+    assert _ops(mut, "move_card") == []  # nothing quarantined when invariant fails
+
+
+# ── Never-touch / no-touch (renames skipped) ───────────────────────────────
+
+def _rename(card_id, new_name):
+    return {"card_id": card_id, "new_name": new_name}
+
+
+def _run_hygiene(board, settings, db_path, now_utc, verdicts, flagged=None):
+    mut = _mut()
+    result = ex.ExecutionResult()
+    ex.execute_hygiene(db_path, mut, board, verdicts, set(flagged or []), settings, now_utc, NOW_ISO, result)
+    return mut, result
+
+
+def test_no_touch_window_blocks_edit(board, settings, db_path, now_utc):
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("recent_edit", "New Name")])
+    assert all(e["card_id"] != "recent_edit" for e in _ops(mut, "rename"))
+
+
+def test_never_touch_grooming_report_card(board, settings, db_path, now_utc):
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("report_card", "Renamed Report")])
+    assert _ops(mut, "rename") == []
+
+
+def test_never_touch_open_proposed_card(board, settings, db_path, now_utc):
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("proposed_card", "New")])
+    assert _ops(mut, "rename") == []
+
+
+def test_never_touch_out_of_scope_card(board, settings, db_path, now_utc):
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("dup_scratch_src", "New")])
+    assert _ops(mut, "rename") == []
+
+
+# ── Rename caps and priority ───────────────────────────────────────────────
+
+def test_cap_max_renames_per_run_enforced(board, make_settings, db_path, now_utc):
+    settings = make_settings(max_renames_per_run=1)
+    mut, result = _run_hygiene(board, settings, db_path, now_utc,
+                               [_rename("name_pipe", "Call Dana and prep agenda"),
+                                _rename("name_double", "Send the deck")],
+                               flagged=["name_pipe", "name_double"])
+    assert result.counters["renames"] == 1
+
+
+def test_cap_max_renames_prioritizes_flagged_names(board, make_settings, db_path, now_utc):
+    settings = make_settings(max_renames_per_run=1)
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc,
+                          [_rename("name_clean", "Review RSM comp with Colin now"),
+                           _rename("name_pipe", "Call Dana and prep agenda")],
+                          flagged=["name_pipe"])
+    renamed = [e["card_id"] for e in _ops(mut, "rename")]
+    assert renamed == ["name_pipe"]  # flagged wins the single slot
+
+
+def test_name_llm_nominated_rename_beyond_flagged_allowed(board, settings, db_path, now_utc):
+    """A clean (non-flagged) card the LLM still nominates may be renamed (filter not a gate)."""
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc,
+                          [_rename("name_clean", "Review RSM comp with Colin today")], flagged=[])
+    assert any(e["card_id"] == "name_clean" for e in _ops(mut, "rename"))
+
+
+def test_dead_due_clear_is_tier1(board, settings, db_path, now_utc):
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [{"card_id": "dead_due", "clear_due": True}])
+    assert any(e["card_id"] == "dead_due" for e in _ops(mut, "clear_due"))
+    assert any(e["card_id"] == "dead_due" for e in _ops(mut, "add_comment"))
+
+
+# ── Proposals: rejection ledger + cap ──────────────────────────────────────
+
+def test_rejection_ledger_consulted_before_proposal(board, settings, db_path):
+    storage.add_rejection(db_path, "merge|dup_person_a,dup_person_b", "edit", NOW_ISO)
+    mut = _mut()
+    result = ex.ExecutionResult()
+    action = {"type": "merge", "card_ids": ["dup_person_a", "dup_person_b"],
+              "anchor_card_id": "dup_person_a", "reason": "dup"}
+    ex.generate_proposals(db_path, mut, board, [action], settings, NOW_ISO, result)
+    assert storage.count_open_proposals(db_path) == 0
+    assert result.proposals_opened == []
+
+
+def test_cap_max_proposals_open_stops_generation(board, make_settings, db_path):
+    settings = make_settings(max_proposals_open=0)
+    mut = _mut()
+    result = ex.ExecutionResult()
+    action = {"type": "merge", "card_ids": ["dup_person_a", "dup_person_b"],
+              "anchor_card_id": "dup_person_a", "reason": "dup"}
+    ex.generate_proposals(db_path, mut, board, [action], settings, NOW_ISO, result)
+    assert storage.count_open_proposals(db_path) == 0
+
+
+def test_proposal_created_and_labeled_when_allowed(board, settings, db_path):
+    mut = _mut()
+    result = ex.ExecutionResult()
+    action = {"type": "merge", "card_ids": ["dup_person_a", "dup_person_b"],
+              "anchor_card_id": "dup_person_a", "reason": "Owners conflict — recommend merge"}
+    ex.generate_proposals(db_path, mut, board, [action], settings, NOW_ISO, result)
+    assert storage.count_open_proposals(db_path) == 1
+    assert _ops(mut, "set_labels")  # proposed label added to anchor

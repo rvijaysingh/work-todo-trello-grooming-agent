@@ -1,0 +1,21 @@
+{
+  "workstreams": [
+    { "name": "Sales Summit", "status": "Done", "context": "Event finished; only wrap-up notes remain." },
+    { "name": "AdmitHub rollout", "status": "Active", "context": "Phased rollout in progress." },
+    { "name": "Adaptive Connect", "status": "Active", "context": "Integration work ongoing." },
+    { "name": "RSM comp", "status": "Active", "context": "Comp plan for RSM being finalized with Colin." },
+    { "name": "Q3 objectives", "status": "Active", "context": "Quarterly objectives and forecast." },
+    { "name": "Forge", "status": "Winding down", "context": "Forge work mostly wrapped." },
+    { "name": "Weekend referral strategy", "status": "Active", "context": "Ty leads weekend referral strategy." }
+  ],
+  "people": [
+    { "name": "Colin", "role": "RSM", "context": "Works with Vijay on comp plans." },
+    { "name": "Logan", "role": "AE", "context": "Owns Forge-related items." },
+    { "name": "Dana", "role": "Analyst", "context": "Builds forecast decks." },
+    { "name": "Ty", "role": "Partner", "context": "Weekend referral strategy." }
+  ],
+  "notes": [
+    "Done-workstream cards are archive candidates.",
+    "Unknown-context cards default to Inbox / Triage routing."
+  ]
+}

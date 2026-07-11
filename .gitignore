@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local runtime state (never committed)
+state.db
+state.db-wal
+state.db-shm
+logs/
+*.log
+
+# Secrets live only in the global config/.env.json (outside this repo)
+.env.json

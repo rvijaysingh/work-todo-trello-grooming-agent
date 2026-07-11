@@ -1,0 +1,73 @@
+{
+  "board_shortlink": "RwdXsia3",
+  "edit_scope_lists": ["Today", "Inbox / Triage", "Next Few Days"],
+  "comparison_extra_lists": ["This Week"],
+  "recovery_include_pattern": "^Scratch",
+  "recovery_exclude_pattern": "^ARCHIVE",
+
+  "quarantine_list": "Agent: Merged/Removed",
+  "report_list": "Today",
+  "labels": {
+    "auto_updated": "Agent: Auto-Updated",
+    "proposed": "Agent: Proposed"
+  },
+
+  "recovery_batch_size": 15,
+  "recovery_today_max": 3,
+
+  "quarantine_days": 7,
+  "proposal_timeout_days": 7,
+  "no_touch_hours": 12,
+  "dead_due_days": 14,
+  "optimistic_label_days": 7,
+
+  "max_merges_per_run": 10,
+  "max_renames_per_run": 15,
+  "max_recoveries_per_run": 15,
+  "max_proposals_open": 20,
+
+  "tier1_stale_label_removal": false,
+  "tier1_recovery_archive": false,
+
+  "wide_block_jaccard": 0.5,
+  "narrow_hint_jaccard": 0.4,
+
+  "name_min_length": 4,
+  "name_max_length": 100,
+
+  "model": "claude-sonnet-4-6",
+  "ollama_model": "qwen3:8b",
+  "weekly_sweep_day": "sunday",
+
+  "dry_run": true,
+  "auto_pause_after_failures": 3,
+  "spine_page_id": "3966c55b25638155a69dfdb1421d5d3e",
+  "entity_keywords_seed": [
+    "sales summit",
+    "admithub",
+    "adaptive connect",
+    "comp plan",
+    "comp",
+    "intake",
+    "escalation",
+    "forge",
+    "q3",
+    "forecast",
+    "objectives",
+    "onboarding",
+    "collateral",
+    "sales hub",
+    "hiring",
+    "weekend referral",
+    "scoreboard",
+    "hchb",
+    "payer",
+    "focus group",
+    "dashboard"
+  ],
+  "local_tz_offsets": { "standard": -5, "daylight": -4 },
+  "log_level": "INFO",
+
+  "db_path": "state.db",
+  "report_file": "logs/grooming_report.txt"
+}

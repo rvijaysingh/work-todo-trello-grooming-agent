@@ -147,6 +147,8 @@ Key parameters and defaults: `board_shortlink: RwdXsia3`; `edit_scope_lists: [To
 
 Credentials come from global `C:\Users\VJ\VS Code Projects\config\.env.json` — Trello key/token, Notion token, `anthropic_api_keys.work-todo-trello-grooming-agent`, Gmail SMTP for alerts. Shared library receives all settings as parameters and owns no config files.
 
+All wall-clock window math (no-touch, quarantine/label expiry, dead-due, proposal timeout) runs through the stdlib-only UTC-offset + US-DST helper `agent_shared.infra.timeutil`, driven by the `local_tz_offsets` config field. This helper was **added to `agent-shared-library` as part of this build** (ported from the granola-to-notion agent's local `timezone_helpers`); `zoneinfo` is never imported. See `docs/config.md` for the `local_tz_offsets` schema.
+
 ## 8. Model Choice and Cost
 
 Sonnet 4.6 ($3/$15 per MTok) for all three judgment calls — merge composition and spine-grounded triage benefit from Sonnet-level judgment, and volume is small. With the shared prefix cached (~15–20k tokens at 10% read cost) and modest marginal inputs/outputs, daily runs estimate to roughly $0.10–0.25/day, i.e., under ~$8/month, plus a slightly larger Sunday sweep. If costs matter later, the hygiene pass is the natural candidate to route to Haiku 4.5 ($1/$5). Cost tracked via the dedicated per-agent API key.

@@ -21,17 +21,19 @@ Operational findings from building and debugging the agent. Newest first.
 - **Resolution:** `BoardMutator.clear_due` calls `update_card(card_id, due_date="")`.
   The Trello API treats an empty string as "clear the due date."
 
-## Card badges (attachments / checklists) are not exposed by parsed list reads
-- **Root cause:** `TrelloClient.get_list_cards` returns `TrelloCard` objects that
-  drop the raw `badges` field, so `has_attachments` / `has_checklist` — needed for
-  the design §5.3 forced-Tier-2 merge rule — cannot be populated from runtime list
-  reads. `phases.snapshot_diff.build_board` (used for the fixture and any raw
-  payload) reads badges directly, so the rule is fully enforced in tests.
-- **Impact / follow-up:** at runtime the attachment/checklist forced-Tier-2 rule
-  can only fire when badge data is available. Recommended shared-lib enhancement:
-  have `TrelloClient` surface `badges.attachments` and `badges.checkItems` on
-  `TrelloCard`. The primary merge safety net — the string-containment invariant —
-  is always enforced regardless.
+## Card badges (attachments / checklists) — RESOLVED in agent-shared-library 0.2.1
+- **Original root cause:** `TrelloClient.get_list_cards` returned `TrelloCard`
+  objects that dropped the raw `badges` field, so `has_attachments` /
+  `has_checklist` — needed for the design §5.3 forced-Tier-2 merge rule — could not
+  be populated from runtime list reads; only `build_board` (fixture/raw payload)
+  read badges directly.
+- **Resolution:** agent-shared-library **0.2.1** adds `attachment_count` (int) and
+  `has_checklist` (bool) to `TrelloCard`, populated by `_parse_card` from the Trello
+  `badges` object and `idChecklists`. `phases.snapshot_diff.card_from_trello` now
+  maps these onto the agent's `Card`, so the forced-Tier-2 rule fires on the real
+  runtime parsing path. Verified by `tests/test_badges_runtime.py`, which drives raw
+  Trello dicts through the shared `_parse_card` (not fixture badges).
+- The string-containment merge invariant remains the primary safety net regardless.
 
 ## No per-label application timestamp from Trello without action history
 - **Root cause:** Trello does not return when a given label was applied to a card

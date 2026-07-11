@@ -84,7 +84,12 @@ def build_board(raw: dict) -> BoardView:
 
 
 def card_from_trello(tc, list_name: str) -> Card:
-    """Build a Card from a shared TrelloCard (runtime; badges unavailable)."""
+    """Build a Card from a shared TrelloCard.
+
+    Attachment/checklist badges come from TrelloCard.attachment_count /
+    has_checklist (agent-shared-library >= 0.2.1), so the forced-Tier-2 merge rule
+    (design §5.3) fires at runtime — not just against fixture badges.
+    """
     return Card(
         id=tc.id,
         name=tc.name,
@@ -95,6 +100,8 @@ def card_from_trello(tc, list_name: str) -> Card:
         label_names=[lbl.name for lbl in tc.labels],
         due=tc.due_date,
         last_activity=tc.last_activity,
+        has_attachments=getattr(tc, "attachment_count", 0) > 0,
+        has_checklist=getattr(tc, "has_checklist", False),
         closed=tc.closed,
         url=tc.url,
         pos=tc.position,

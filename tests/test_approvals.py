@@ -77,8 +77,8 @@ def test_approval_unrelated_comment_ignored(board, settings, db_path):
 
 
 def test_proposal_timeout_expires_and_fingerprints(board, make_settings, db_path, now_utc):
-    settings = make_settings()
-    pid = _add_open_proposal(db_path, "proposed_card", opened="2026-07-01T00:00:00+00:00",
+    settings = make_settings()  # proposal_timeout_days default 14
+    pid = _add_open_proposal(db_path, "proposed_card", opened="2026-06-20T00:00:00+00:00",
                              fp="merge|proposed_card")
     result = ex.ExecutionResult()
     ex.expire_proposals(db_path, board, storage.get_open_proposals(db_path), settings,
@@ -87,9 +87,9 @@ def test_proposal_timeout_expires_and_fingerprints(board, make_settings, db_path
     assert storage.is_rejected(db_path, "merge|proposed_card")
 
 
-def test_proposal_timeout_independent_of_quarantine_days(board, make_settings, db_path, now_utc):
-    # opened 3 days ago; timeout=2 (expire) even though quarantine_days=30 (would not).
-    settings = make_settings(proposal_timeout_days=2, quarantine_days=30)
+def test_proposal_timeout_independent_of_archive_list_days(board, make_settings, db_path, now_utc):
+    # opened 3 days ago; timeout=2 (expire) even though archive_list_days=30 (would not).
+    settings = make_settings(proposal_timeout_days=2, archive_list_days=30)
     pid = _add_open_proposal(db_path, "proposed_card", opened="2026-07-08T00:00:00+00:00",
                              fp="merge|proposed_card")
     result = ex.ExecutionResult()

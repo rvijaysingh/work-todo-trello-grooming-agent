@@ -6,7 +6,7 @@
     { "id": "L_inbox", "name": "Inbox / Triage", "closed": false, "pos": 2 },
     { "id": "L_nfd", "name": "Next Few Days", "closed": false, "pos": 3 },
     { "id": "L_week", "name": "This Week", "closed": false, "pos": 4 },
-    { "id": "L_quar", "name": "Agent: Merged/Removed", "closed": false, "pos": 5 },
+    { "id": "L_archive", "name": "Agent Archive", "closed": false, "pos": 11 },
     { "id": "L_s71", "name": "Scratch 7-1", "closed": false, "pos": 6 },
     { "id": "L_s624", "name": "Scratch 6-24", "closed": false, "pos": 7 },
     { "id": "L_s63", "name": "Scratch 6-3", "closed": false, "pos": 8 },
@@ -84,9 +84,9 @@
     { "id": "auto_old", "idList": "L_today", "name": "Old auto card", "desc": "body", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": ["LB_auto"], "labels": [{"name": "Agent: Auto-Updated"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/autoold", "closed": false },
     { "id": "auto_fresh", "idList": "L_today", "name": "Fresh auto card", "desc": "body", "due": null, "dateLastActivity": "2026-07-06T12:00:00.000Z", "idLabels": ["LB_auto"], "labels": [{"name": "Agent: Auto-Updated"}], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/autofresh", "closed": false },
 
-    { "id": "quar_old", "idList": "L_quar", "name": "Quarantined old", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/quarold", "closed": false },
-    { "id": "quar_new", "idList": "L_quar", "name": "Quarantined recent", "desc": "", "due": null, "dateLastActivity": "2026-07-08T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/quarnew", "closed": false },
-    { "id": "quar_pullback", "idList": "L_today", "name": "Pulled back from quarantine", "desc": "", "due": null, "dateLastActivity": "2026-07-10T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pull", "closed": false },
+    { "id": "arch_old", "idList": "L_archive", "name": "Archived long ago", "desc": "", "due": null, "dateLastActivity": "2026-04-20T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/archold", "closed": false },
+    { "id": "arch_new", "idList": "L_archive", "name": "Archived recently", "desc": "", "due": null, "dateLastActivity": "2026-07-08T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/archnew", "closed": false },
+    { "id": "arch_pullback", "idList": "L_today", "name": "Pulled back from archive", "desc": "", "due": null, "dateLastActivity": "2026-07-10T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/pull", "closed": false },
 
     { "id": "rec_s71_1", "idList": "L_s71", "name": "Sales Summit wrap-up note", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r711", "closed": false },
     { "id": "rec_s71_2", "idList": "L_s71", "name": "Adaptive Connect follow up", "desc": "", "due": null, "dateLastActivity": "2026-07-01T12:00:00.000Z", "idLabels": [], "labels": [], "badges": {"attachments": 0, "checkItems": 0}, "shortUrl": "http://trello/r712", "closed": false },

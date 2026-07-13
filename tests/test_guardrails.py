@@ -80,22 +80,52 @@ def test_tier_merge_loser_has_checklist_forced_tier2(settings):
     assert g.assign_tier({"type": "merge", "loser_has_checklist": True}, settings) == 2
 
 
-def test_tier_recovery_archive_default_tier2(settings):
-    assert g.assign_tier({"type": "recovery_archive"}, settings) == 2
+def test_tier_recovery_archive_default_tier1_auto_mode(settings):
+    # Automatic mode is the shipped default (tier1_recovery_archive=true).
+    assert settings.tier1_recovery_archive is True
+    assert g.assign_tier({"type": "recovery_archive", "confidence": 90}, settings) == 1
 
 
-def test_tier_recovery_archive_tier1_when_flag_set(make_settings):
-    s = make_settings(tier1_recovery_archive=True)
-    assert g.assign_tier({"type": "recovery_archive"}, s) == 1
+def test_tier_recovery_archive_tier2_when_flag_off(make_settings):
+    s = make_settings(tier1_recovery_archive=False)
+    assert g.assign_tier({"type": "recovery_archive", "confidence": 90}, s) == 2
 
 
-def test_tier_stale_label_removal_default_tier2(settings):
-    assert g.assign_tier({"type": "stale_label_removal"}, settings) == 2
+def test_tier_recovery_archive_borderline_to_tier2(settings):
+    # Flag on, but a low-confidence/borderline call still becomes a proposal.
+    assert g.assign_tier({"type": "recovery_archive", "confidence": 40}, settings) == 2
+    assert g.assign_tier({"type": "recovery_archive", "borderline": True}, settings) == 2
 
 
-def test_tier_stale_label_removal_tier1_when_flag_set(make_settings):
-    s = make_settings(tier1_stale_label_removal=True)
-    assert g.assign_tier({"type": "stale_label_removal"}, s) == 1
+def test_tier_stale_label_removal_default_tier1_auto_mode(settings):
+    assert settings.tier1_stale_label_removal is True
+    assert g.assign_tier({"type": "stale_label_removal", "confidence": 100}, settings) == 1
+
+
+def test_tier_stale_label_removal_tier2_when_flag_off(make_settings):
+    s = make_settings(tier1_stale_label_removal=False)
+    assert g.assign_tier({"type": "stale_label_removal", "confidence": 100}, s) == 2
+
+
+def test_tier_due_clear_default_tier1_auto_mode(settings):
+    assert settings.tier1_due_date_clear is True
+    assert g.assign_tier({"type": "dead_due_clear", "confidence": 90}, settings) == 1
+    assert g.assign_tier({"type": "due_redate", "confidence": 90}, settings) == 1
+
+
+def test_tier_due_clear_tier2_when_flag_off(make_settings):
+    s = make_settings(tier1_due_date_clear=False)
+    assert g.assign_tier({"type": "dead_due_clear", "confidence": 90}, s) == 2
+
+
+def test_tier_due_clear_borderline_to_tier2(settings):
+    assert g.assign_tier({"type": "dead_due_clear", "confidence": 50}, settings) == 2
+
+
+def test_is_borderline_below_auto_min_confidence(settings):
+    assert g.is_borderline({"confidence": settings.auto_min_confidence - 1}, settings) is True
+    assert g.is_borderline({"confidence": settings.auto_min_confidence}, settings) is False
+    assert g.is_borderline({}, settings) is False  # unscored deterministic action
 
 
 def test_tier_llm_high_confidence_cannot_override_forced_tier2(settings):
@@ -107,10 +137,18 @@ def test_tier_llm_high_confidence_cannot_override_forced_tier2(settings):
 
 # ── Section 4: never-touch (card edited within 12h → no action) ────────────
 
-def test_tier_card_edited_within_12h_never_touched(board, settings, now_utc):
+def test_tier_card_edited_within_no_touch_never_touched(board, make_settings, now_utc):
+    settings = make_settings(no_touch_hours=12)
     card = board.card_by_id("recent_edit")  # last_activity 4h before now
     in_scope = {board.list_by_name(n).id for n in settings.edit_scope_lists}
     assert g.is_never_touch(card, now_utc, settings, in_scope, set(), None) is True
+
+
+def test_no_touch_zero_recent_edit_is_touchable(board, settings, now_utc):
+    assert settings.no_touch_hours == 0
+    card = board.card_by_id("recent_edit")
+    in_scope = {board.list_by_name(n).id for n in settings.edit_scope_lists}
+    assert g.is_never_touch(card, now_utc, settings, in_scope, set(), None) is False
 
 
 def test_never_touch_clean_in_scope_card_is_touchable(board, settings, now_utc):
@@ -174,6 +212,34 @@ def test_name_grounding_rejects_invented_entity(spine):
     assert g.name_is_grounded("Send comp plan to Zephyr", ["Send RSM comp plan to Colin"], spine.all_terms()) is False
 
 
+# ── Date grounding (re-date only from a written source) ────────────────────
+
+def test_value_written_in_sources_true_when_present():
+    assert g.value_written_in_sources("2026-08-15", ["Payer deadline moved to 2026-08-15"]) is True
+
+
+def test_value_written_in_sources_false_when_absent():
+    assert g.value_written_in_sources("2026-08-15", ["no date here"]) is False
+
+
+def test_value_written_in_sources_empty_is_false():
+    assert g.value_written_in_sources(None, ["anything"]) is False
+
+
+# ── Archive-list expiry predicate ──────────────────────────────────────────
+
+def test_archive_list_expired_beyond_window(settings, now_utc):
+    from datetime import timedelta
+    old = (now_utc - timedelta(days=settings.archive_list_days + 1)).isoformat()
+    assert g.archive_list_expired(old, now_utc, settings) is True
+
+
+def test_archive_list_not_expired_within_window(settings, now_utc):
+    from datetime import timedelta
+    recent = (now_utc - timedelta(days=5)).isoformat()
+    assert g.archive_list_expired(recent, now_utc, settings) is False
+
+
 # ── Section 5/1: window predicates ─────────────────────────────────────────
 
 def test_dead_due_beyond_window_is_dead(board, settings, now_utc):
@@ -184,7 +250,7 @@ def test_dead_due_within_window_left_alone(board, settings, now_utc):
     assert g.due_is_dead(board.card_by_id("live_due").due, now_utc, settings) is False
 
 
-def test_label_expired_beyond_quarantine_days(board, settings, now_utc):
+def test_label_expired_beyond_window(board, settings, now_utc):
     assert g.label_expired(board.card_by_id("auto_old").last_activity, now_utc, settings) is True
 
 

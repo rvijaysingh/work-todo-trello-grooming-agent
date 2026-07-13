@@ -20,8 +20,9 @@ def test_e2e_dedup_merge_pipeline(board, make_settings, db_path, spine, now_utc,
     result, text, mut = run_pipeline(board, settings, db_path, now_utc, dry_run=False, first_run=True,
                                      spine=spine, trello=MagicMock(), judgments=judgments)
     assert any(a["type"] == "merge" for a in result.applied)
-    quar = board.list_by_name(settings.quarantine_list).id
-    assert any(e["card_id"] == "dup_exact_a" and e["target_list_id"] == quar for e in _ops(mut, "move_card"))
+    archive = board.list_by_name(settings.archive_list_name).id
+    assert any(e["card_id"] == "dup_exact_a" and e["target_list_id"] == archive for e in _ops(mut, "move_card"))
+    assert storage.archive_entry_ts(db_path, "dup_exact_a") is not None
     assert "merge" in text.lower()
 
 
@@ -53,9 +54,12 @@ def test_e2e_run_report_generated(board, make_settings, db_path, spine, now_utc,
     settings = make_settings(report_file=str(tmp_path / "r.txt"))
     _, text, _ = run_pipeline(board, settings, db_path, now_utc, dry_run=True, first_run=True,
                               spine=spine, trello=MagicMock(), judgments={"clusters": [], "hygiene": [], "recovery": []})
-    for section in ("Grooming Report", "Auto-applied actions", "Open proposals",
-                    "Quarantine", "Health", "approval rates"):
-        assert section in text
+    # The five canonical sections, in order.
+    sections = ["Still overdue and possibly urgent", "Awaiting your decision",
+                "Recently archived", "Done automatically", "Health stats"]
+    idxs = [text.index(s) for s in sections]
+    assert idxs == sorted(idxs), "sections must appear in the canonical order"
+    assert "Grooming Report" in text
     assert "ARCHIVE" in text  # pre-first-run reminder present in dry-run
 
 

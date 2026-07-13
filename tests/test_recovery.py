@@ -91,15 +91,36 @@ def test_recovery_merge_into_active_card(board, settings, db_path):
     mut, _, _ = _run_recovery(board, settings, db_path,
                               [{"card_id": "rec_s71_2", "disposition": "merge",
                                 "merge_into": "dup_exact_a", "llm_tier": 1}])
-    quar = board.list_by_name(settings.quarantine_list).id
-    assert any(e["card_id"] == "rec_s71_2" and e["target_list_id"] == quar for e in _ops(mut, "move_card"))
+    archive = board.list_by_name(settings.archive_list_name).id
+    assert any(e["card_id"] == "rec_s71_2" and e["target_list_id"] == archive for e in _ops(mut, "move_card"))
 
 
-def test_recovery_propose_archive_default_tier2(board, settings, db_path):
+def test_recovery_archive_auto_when_confident(board, settings, db_path):
+    # Automatic mode default: a confident "no longer needed" card is archived now.
     mut, result, tier2 = _run_recovery(board, settings, db_path,
-                                       [{"card_id": "rec_s71_1", "disposition": "archive"}])
+                                       [{"card_id": "rec_s71_1", "disposition": "archive", "confidence": 90}])
+    assert tier2 == []
+    archive = board.list_by_name(settings.archive_list_name).id
+    assert any(e["card_id"] == "rec_s71_1" and e["target_list_id"] == archive
+               and e.get("position") == "top" for e in _ops(mut, "move_card"))
+    assert storage.archive_entry_ts(db_path, "rec_s71_1") == NOW_ISO
+    assert any(a["card_id"] == "rec_s71_1" for a in result.recently_archived)
+    # Wording is archive-not-deletion.
+    assert any(ex.ARCHIVE_MOVED_WORDING in e["text"] for e in _ops(mut, "add_comment"))
+
+
+def test_recovery_archive_borderline_proposed(board, settings, db_path):
+    mut, result, tier2 = _run_recovery(board, settings, db_path,
+                                       [{"card_id": "rec_s71_1", "disposition": "archive", "confidence": 40}])
     assert any(v["card_id"] == "rec_s71_1" for v in tier2)
     assert all(e["card_id"] != "rec_s71_1" for e in _ops(mut, "move_card"))
+
+
+def test_recovery_archive_proposed_when_flag_off(board, make_settings, db_path):
+    settings = make_settings(tier1_recovery_archive=False)
+    mut, result, tier2 = _run_recovery(board, settings, db_path,
+                                       [{"card_id": "rec_s71_1", "disposition": "archive", "confidence": 95}])
+    assert any(v["card_id"] == "rec_s71_1" for v in tier2)
 
 
 def test_recovery_routed_card_gets_origin_comment(board, settings, db_path):

@@ -24,16 +24,20 @@ def _dup_verdict(a, b, survivor):
 
 # ── Merges ─────────────────────────────────────────────────────────────────
 
-def test_merge_moves_loser_to_quarantine_not_archive(board, settings, db_path, now_utc):
+def test_merge_moves_loser_to_archive_list_not_trello_archive(board, settings, db_path, now_utc):
     mut = _mut()
     result = ex.ExecutionResult()
     ex.execute_merges(db_path, mut, board, [_dup_verdict("dup_exact_a", "dup_exact_b", "dup_exact_b")],
                       settings, now_utc, NOW_ISO, result)
-    quar = board.list_by_name(settings.quarantine_list).id
+    archive = board.list_by_name(settings.archive_list_name).id
     moves = _ops(mut, "move_card")
-    assert any(m["card_id"] == "dup_exact_a" and m["target_list_id"] == quar for m in moves)
+    # Loser moved to the TOP of the Agent Archive list, never Trello-archived directly.
+    assert any(m["card_id"] == "dup_exact_a" and m["target_list_id"] == archive
+               and m.get("position") == "top" for m in moves)
     assert _ops(mut, "add_comment")
-    assert _ops(mut, "archive_card") == []  # loser quarantined, never archived
+    assert _ops(mut, "archive_card") == []
+    # Entry timestamp tracked in SQLite.
+    assert storage.archive_entry_ts(db_path, "dup_exact_a") == NOW_ISO
 
 
 def test_cap_max_merges_per_run_enforced(board, make_settings, db_path, now_utc):
@@ -52,7 +56,7 @@ def test_merge_invariant_violation_blocks_move(board, settings, db_path, now_utc
     result = ex.ExecutionResult()
     ex.execute_merge(db_path, mut, board, _dup_verdict("dup_exact_a", "dup_exact_b", "dup_exact_b"),
                      settings, NOW_ISO, result)
-    assert _ops(mut, "move_card") == []  # nothing quarantined when invariant fails
+    assert _ops(mut, "move_card") == []  # nothing archived when invariant fails
 
 
 # ── Never-touch / no-touch (renames skipped) ───────────────────────────────
@@ -68,9 +72,25 @@ def _run_hygiene(board, settings, db_path, now_utc, verdicts, flagged=None):
     return mut, result
 
 
-def test_no_touch_window_blocks_edit(board, settings, db_path, now_utc):
+def test_no_touch_window_blocks_edit(board, make_settings, db_path, now_utc):
+    # With a positive no_touch window a recently edited card is skipped.
+    settings = make_settings(no_touch_hours=12)
     mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("recent_edit", "New Name")])
     assert all(e["card_id"] != "recent_edit" for e in _ops(mut, "rename"))
+
+
+def test_no_touch_zero_allows_recent_edit(board, settings, db_path, now_utc):
+    # Default no_touch_hours=0 disables the window; the recent-edit card is touchable.
+    assert settings.no_touch_hours == 0
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("recent_edit", "New Name")])
+    assert any(e["card_id"] == "recent_edit" for e in _ops(mut, "rename"))
+
+
+def test_no_touch_zero_still_protects_open_proposed_card(board, settings, db_path, now_utc):
+    # Even with no_touch_hours=0, the open-proposal lock protects proposed_card.
+    assert settings.no_touch_hours == 0
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [_rename("proposed_card", "New")])
+    assert _ops(mut, "rename") == []
 
 
 def test_never_touch_grooming_report_card(board, settings, db_path, now_utc):
@@ -117,9 +137,46 @@ def test_name_llm_nominated_rename_beyond_flagged_allowed(board, settings, db_pa
 
 
 def test_dead_due_clear_is_tier1(board, settings, db_path, now_utc):
-    mut, _ = _run_hygiene(board, settings, db_path, now_utc, [{"card_id": "dead_due", "clear_due": True}])
+    mut = _mut()
+    result = ex.ExecutionResult()
+    ex.execute_hygiene(db_path, mut, board, [{"card_id": "dead_due", "clear_due": True}], set(),
+                       settings, now_utc, NOW_ISO, result, dead_due_ids={"dead_due"})
     assert any(e["card_id"] == "dead_due" for e in _ops(mut, "clear_due"))
     assert any(e["card_id"] == "dead_due" for e in _ops(mut, "add_comment"))
+
+
+def test_rename_carries_change_comment_with_confidence(board, settings, db_path, now_utc):
+    mut, _ = _run_hygiene(board, settings, db_path, now_utc,
+                          [{"card_id": "name_pipe", "new_name": "Call Dana and prep agenda",
+                            "confidence": 88, "reason": "Split multi-part title"}],
+                          flagged=["name_pipe"])
+    comment = [e for e in _ops(mut, "add_comment") if e["card_id"] == "name_pipe"][0]["text"]
+    assert "Renamed from" in comment and "Confidence: 88%" in comment
+
+
+# ── Stale time-based label auto-removal (auto-mode default) ─────────────────
+
+def test_stale_label_auto_removed_tier1(board, settings, db_path, now_utc):
+    card = board.card_by_id("stale_label")
+    mut = _mut()
+    result = ex.ExecutionResult()
+    tier2 = ex.execute_stale_labels(db_path, mut, board, [(card, "1. Today (must do)")],
+                                    settings, now_utc, NOW_ISO, result)
+    assert tier2 == []
+    stripped = [e for e in _ops(mut, "set_labels") if e["card_id"] == "stale_label"]
+    assert stripped and "LB_t" not in stripped[0]["label_ids"]
+    assert any("Removed stale label" in e["text"] for e in _ops(mut, "add_comment"))
+
+
+def test_stale_label_proposed_when_flag_off(board, make_settings, db_path, now_utc):
+    settings = make_settings(tier1_stale_label_removal=False)
+    card = board.card_by_id("stale_label")
+    mut = _mut()
+    result = ex.ExecutionResult()
+    tier2 = ex.execute_stale_labels(db_path, mut, board, [(card, "1. Today (must do)")],
+                                    settings, now_utc, NOW_ISO, result)
+    assert any(a["type"] == "stale_label_removal" for a in tier2)
+    assert _ops(mut, "set_labels") == []
 
 
 # ── Proposals: rejection ledger + cap ──────────────────────────────────────

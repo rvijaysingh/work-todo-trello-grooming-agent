@@ -17,5 +17,11 @@
   "notes": [
     "Done-workstream cards are archive candidates.",
     "Unknown-context cards default to Inbox / Triage routing."
-  ]
+  ],
+  "naming_standard": [
+    "Start with a verb where natural (Send, Review, Draft).",
+    "Put the person's name after an em-dash: 'Task — Colin'."
+  ],
+  "page_url": "https://www.notion.so/Trello-Grooming-Agent-Spine-3966c55b25638155a69dfdb1421d5d3e",
+  "rules": {}
 }

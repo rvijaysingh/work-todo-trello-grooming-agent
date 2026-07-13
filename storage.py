@@ -376,6 +376,31 @@ def record_failure(db_path: str, ts: str, auto_pause_after: int) -> tuple[int, b
     return failures, bool(paused)
 
 
+_STATE_TABLES = ("snapshots", "actions", "proposals", "rejections",
+                 "recovery_ledger", "archive_ledger", "kv")
+
+
+def reset_state(db_path: str) -> dict[str, int]:
+    """Wipe all run/diff state so no stale (e.g. dry-run-contaminated) rows leak
+    into a later run's diff. Clears snapshots, actions, proposals, rejections,
+    recovery/archive ledgers, and kv, and resets the failure/pause counters.
+
+    Safe to run before go-live: it deletes ONLY agent-tracked state, never board
+    data. Returns {table: rows_deleted}.
+    """
+    deleted: dict[str, int] = {}
+    with db_connection(db_path) as conn:
+        for table in _STATE_TABLES:
+            n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"DELETE FROM {table}")
+            deleted[table] = int(n)
+        conn.execute(
+            "UPDATE run_state SET consecutive_failures = 0, paused = 0 WHERE id = 1"
+        )
+    logger.info("reset_state cleared: %s", deleted)
+    return deleted
+
+
 def clear_pause(db_path: str, ts: str) -> None:
     """Clear the paused flag and reset the failure counter (manual recovery)."""
     with db_connection(db_path) as conn:

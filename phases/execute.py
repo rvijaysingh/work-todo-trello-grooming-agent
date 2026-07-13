@@ -47,7 +47,7 @@ class BoardMutator:
             self.trello.update_card(card_id, name=new_name)
 
     def set_description(self, card_id: str, desc: str) -> None:
-        self._record("set_description", card_id=card_id)
+        self._record("set_description", card_id=card_id, desc=desc)
         if not self.dry_run:
             self.trello.update_card(card_id, description=desc)
 
@@ -484,7 +484,9 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
     handled_due: set[str] = set()
     for v in hygiene_verdicts:
         cid = v["card_id"]
-        if cid not in dead_due_ids and not v.get("clear_due") and not v.get("due_status"):
+        # Only entries carrying an explicit due decision act here — a rename
+        # verdict for a dead-due card must NOT trigger a clear.
+        if not v.get("clear_due") and not v.get("due_status"):
             continue
         card = board.card_by_id(cid)
         if card is None or not card.due:

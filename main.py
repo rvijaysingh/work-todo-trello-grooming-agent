@@ -49,6 +49,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fira board grooming agent")
     p.add_argument("--dry-run", action="store_true", help="Force dry-run (no board writes)")
     p.add_argument("--run-once", action="store_true", help="Single run (no loop)")
+    p.add_argument("--reset-state", action="store_true",
+                   help="Wipe all run/diff state (snapshots, actions, proposals, rejections, "
+                        "ledgers, kv) and exit. Deletes only agent state, never board data.")
     return p.parse_args(argv)
 
 
@@ -216,16 +219,28 @@ def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity
     clusters_payload = {"names": narrow["names"], "hints": narrow["hints"],
                         "wide_pairs": [{"a": p["a"].id, "b": p["b"].id} for p in wide]}
     hyg_payload = {"flagged": [{"id": c.id, "name": c.name} for c in hyg["flagged_renames"]],
-                   "in_scope": [{"id": c.id, "name": c.name} for c in hyg["all_in_scope"]],
-                   "dead_dues": [{"id": c.id, "name": c.name, "due": c.due,
-                                  "desc": (c.desc or "")[:300]} for c in hyg["dead_dues"]]}
+                   "in_scope": [{"id": c.id, "name": c.name} for c in hyg["all_in_scope"]]}
+    dead_dues = hyg["dead_dues"]
+    due_payload = {"cards": [{"id": c.id, "name": c.name, "due": c.due,
+                              "desc": (c.desc or "")[:300]} for c in dead_dues]}
     rec_payload = {"cards": [{"id": c.id, "name": c.name, "origin": c.list_name} for c in rec_batch]}
 
     recovery = judge.recovery_triage(llm, prompts, prefix, rec_payload, known_ids)
     recovery = _default_recovery(recovery, rec_batch)
+
+    # Renames come from the hygiene pass; dead-due classification is its OWN call
+    # with a per-card-scaled token budget so a large dead-due set is never
+    # truncated. Both feed execute_hygiene as one list (rename entries and due
+    # entries are disjoint per card).
+    hygiene = judge.hygiene_pass(llm, prompts, prefix, hyg_payload, known_ids, src_text, spine_terms)
+    if dead_dues:
+        due_budget = min(8000, max(3000, 120 * len(dead_dues)))
+        hygiene = hygiene + judge.classify_due(
+            llm, prompts, prefix, due_payload, known_ids, src_text, spine_terms,
+            max_tokens=due_budget)
     return {
         "clusters": judge.adjudicate_clusters(llm, prompts, prefix, clusters_payload, known_ids, src_text, spine_terms),
-        "hygiene": judge.hygiene_pass(llm, prompts, prefix, hyg_payload, known_ids, src_text, spine_terms),
+        "hygiene": hygiene,
         "recovery": recovery,
     }
 
@@ -297,9 +312,17 @@ def _approval_rates(db_path):
 
 
 def _post_snapshot(board, mutator):
-    """Apply the mutator log to in-memory cards so the snapshot reflects end-state."""
+    """Apply the mutator log to in-memory cards so the snapshot reflects the true
+    post-run board state.
+
+    Must cover EVERY field the diff compares (name, desc_hash, label_names, due,
+    list_id) — otherwise a live action leaves the saved snapshot out of sync with
+    the board and the next run misreads it as a user reversal (a phantom
+    rejection that permanently suppresses a legitimate action).
+    """
     import copy
 
+    id_to_name = {lb.get("id"): lb.get("name", "") for lb in board.labels}
     cards = {c.id: copy.copy(c) for c in board.cards}
     for entry in mutator.log:
         cid = entry.get("card_id")
@@ -308,12 +331,18 @@ def _post_snapshot(board, mutator):
         op = entry["op"]
         if op == "rename":
             cards[cid].name = entry["new_name"]
+        elif op == "set_description":
+            if "desc" in entry:
+                cards[cid].desc = entry["desc"]
         elif op == "set_labels":
             cards[cid].label_ids = list(entry["label_ids"])
+            cards[cid].label_names = [id_to_name.get(i, "") for i in entry["label_ids"]]
         elif op == "move_card":
             cards[cid].list_id = entry["target_list_id"]
         elif op == "clear_due":
             cards[cid].due = None
+        elif op == "set_due":
+            cards[cid].due = entry.get("due")
     return list(cards.values())
 
 
@@ -336,6 +365,13 @@ def run(argv=None) -> int:
     creds = load_credentials(ENV_CONFIG_PATH)
 
     storage.init_storage(settings.db_path)
+    if args.reset_state:
+        deleted = storage.reset_state(settings.db_path)
+        logger.info("State reset complete: %s", deleted)
+        print("Reset agent state (no board data touched):")
+        for table, n in deleted.items():
+            print(f"  {table}: {n} row(s) cleared")
+        return 0
     if storage.is_paused(settings.db_path):
         logger.error("Agent is PAUSED (three consecutive failures). See README to clear.")
         send_alert("[Agent Alert] work-todo-trello-grooming-agent: PAUSED",

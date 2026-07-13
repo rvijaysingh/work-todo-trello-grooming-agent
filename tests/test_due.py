@@ -98,6 +98,26 @@ def test_every_dead_due_produces_escalation_or_fix(board, settings, db_path, now
     assert "dead_due" in (escalated | fixed | proposed)
 
 
+def test_rename_verdict_does_not_clear_dead_due_date(board, settings, db_path, now_utc):
+    # A rename verdict for a dead-due card must NOT trigger a due clear; the card
+    # is escalated (unclassified) instead — the due decision needs an explicit
+    # due_status from the dedicated pass.
+    mut, result, tier2 = _run(board, settings, db_path, now_utc,
+                              [{"card_id": "dead_due", "new_name": "Follow up with the payer"}])
+    assert _ops(mut, "clear_due") == [] and _ops(mut, "set_due") == []
+    assert any(s["card_id"] == "dead_due" for s in result.still_overdue)
+
+
+def test_full_classification_produces_no_unclassified_fallback(board, settings, db_path, now_utc):
+    # When the dedicated due pass classifies the card, the "Not classified" safety
+    # net does not fire.
+    mut, result, tier2 = _run(board, settings, db_path, now_utc,
+                              [{"card_id": "dead_due", "due_status": "still_matters",
+                                "reason": "Payer workstream active", "confidence": 85}])
+    reasons = [s["reason"] for s in result.still_overdue if s["card_id"] == "dead_due"]
+    assert reasons and all("Not classified" not in r for r in reasons)
+
+
 def test_due_proposed_when_flag_off(board, make_settings, db_path, now_utc):
     settings = make_settings(tier1_due_date_clear=False)
     mut, result, tier2 = _run(board, settings, db_path, now_utc,

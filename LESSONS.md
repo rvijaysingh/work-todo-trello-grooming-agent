@@ -2,6 +2,56 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Pre-fix dry-runs contaminated the diff → phantom "rejections" at go-live
+- **Symptom:** a clean dry-run reported "Rejections detected this run: 4" even
+  though no live agent action had ever happened, so there was nothing to reject.
+- **Root cause:** dry-runs *before* the persistence-gating fix wrote their
+  simulated end-state to SQLite — an 845-row `snapshots` row plus 12 `actions`,
+  1 `proposals`, and recovery/archive ledger rows — while the board was never
+  changed. The next run's `detect_implicit_rejections` diffed the unchanged board
+  against that simulated snapshot and recorded actions and read three merges
+  (losers "in" the archive ledger/snapshot but still in their original board
+  lists → pull-back) plus one stale `open` proposal (whose card never got the
+  `Agent: Proposed` label → read as label-removed) as four user reversals.
+- **Fix:** (1) dry-run already persists nothing now; (2) added
+  `storage.reset_state` + `main.py --reset-state` to wipe all run/diff state
+  (snapshots, actions, proposals, rejections, ledgers, kv) before go-live —
+  deletes only agent state, never board data; (3) ran it to clear the real db.
+  Regression: `test_state_hygiene.py::test_dry_run_then_next_run_detects_zero_rejections`.
+- **Also corrected:** an earlier status message claimed the weekly spine-review
+  card was "already open." It was not — no card exists on the board (creation is
+  gated behind `not dry_run` and no live run has occurred). The real reason the
+  reminder was skipped was the contaminated `kv.last_reminder_week` marker a
+  pre-fix dry-run persisted; clearing state restores "would create" on dry-run.
+
+## _post_snapshot dropped desc/label-name/due → phantom rejections after live actions
+- **Root cause:** the post-run snapshot replayed the mutator log but only updated
+  name, label **ids**, list, and clear-due. It ignored `set_description`,
+  `set_due`, and the label **names** the snapshot actually stores. After a real
+  merge/rename/relabel the saved snapshot therefore disagreed with the board on
+  desc/labels, and the next run misread that as a user edit — a phantom rejection
+  that would permanently suppress a legitimate action at go-live.
+- **Fix:** `_post_snapshot` now applies `set_description`, `set_due`, and maps
+  label ids → names on `set_labels` (BoardMutator.set_description records the
+  desc). Regression: `test_state_hygiene.py::test_post_snapshot_reflects_desc_labels_due`.
+
+## Dead-due classification starved in the shared hygiene call
+- **Symptom:** the live dry-run escalated all 8 overdue in-scope cards as "Not
+  classified this run" — the hygiene LLM returned renames but no `due_status`.
+- **Root cause:** renames and dead-due classification shared one LLM call with a
+  2000-token budget; on a large in-scope set the model spent the budget on
+  renames and truncated/omitted the due classifications, so every dead-due card
+  fell to the escalation fallback. Additionally, the due loop acted on any card
+  merely present in `dead_due_ids`, so a rename verdict for a dead-due card could
+  clear its date.
+- **Fix:** dead-due classification is now its own LLM pass (`prompts/due.md`,
+  `judge.classify_due`) with a per-card-scaled budget (`min(8000, max(3000, 120·N))`)
+  that requires a `due_status` per card. The due loop now acts only on entries
+  carrying an explicit due decision; unclassified dead-dues still escalate (the
+  fallback, now reserved for genuinely unclassifiable cards). Regressions:
+  `test_llm_schema.py::test_classify_due_is_own_call_and_classifies_every_card`,
+  `test_due.py::test_rename_verdict_does_not_clear_dead_due_date`.
+
 ## Executed recoveries never reached the report (result.applied vs result.recoveries)
 - **Symptom:** the first dry-run report showed zero recovery dispositions even
   though the batch ran and cards were (would be) moved.

@@ -53,7 +53,7 @@ No LLM calls in this phase. Facts are pre-computed and passed to the LLM as cons
 - **Hygiene candidates:** in-scope cards with overdue due dates (> `dead_due_days` past), stale time-based labels, or names failing simple quality heuristics (length, all-lowercase fragments, pipe-separated segments, known-typo patterns).
 
 ### Phase 3 — LLM Judgment (Sonnet, batched, prompt-cached)
-Three batched calls sharing a cached prefix (Notion spine + board summary + rules). Model: `claude-sonnet-4-6` primary, Ollama `qwen3:8b` fallback receiving the same unfiltered inputs.
+Four batched calls sharing a cached prefix (Notion spine + board summary + rules): cluster adjudication, hygiene (names/descriptions), **dead-due classification** (its own call with a per-card-scaled token budget so a large overdue set is never truncated), and recovery triage. Model: `claude-sonnet-4-6` primary, Ollama `qwen3:8b` fallback receiving the same unfiltered inputs.
 
 1. **Cluster adjudication:** for each candidate cluster: `duplicate` / `related-but-distinct` / `unrelated`; pick the survivor (most context, most recent activity, best list position); compose merged name + consolidated description; assign confidence tier per the bounded rules in §4.
 2. **Hygiene pass:** cleaned names (typos fixed, verb-first where natural, person references preserved), description structuring, due-date clear/keep decisions, stale-label removals.

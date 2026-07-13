@@ -90,10 +90,16 @@ C:\Users\VJ\AppData\Local\Programs\Python\Python313\python.exe main.py --run-onc
 
 :: live run (only after the dry-run week and setting dry_run:false)
 C:\Users\VJ\AppData\Local\Programs\Python\Python313\python.exe main.py --run-once
+
+:: wipe all run/diff state (snapshots, actions, proposals, rejections, ledgers, kv)
+:: — deletes only agent state, never board data. Run once before go-live to clear
+:: any state left by dry-runs so the first live diff starts clean.
+C:\Users\VJ\AppData\Local\Programs\Python\Python313\python.exe main.py --reset-state
 ```
 
-`--dry-run` forces zero board mutations regardless of config. The report is written
-to `logs/grooming_report.txt` (and, in live mode, to the Grooming Report card).
+`--dry-run` forces zero board mutations **and zero persistent-state changes**
+regardless of config. The report is written to `logs/grooming_report.txt` (and, in
+live mode, to the Grooming Report card).
 
 ### Tests
 

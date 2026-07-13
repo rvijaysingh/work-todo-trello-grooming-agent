@@ -182,15 +182,23 @@ def due_is_dead(due: str | None, now_utc: datetime, settings) -> bool:
 
 
 def label_expired(applied_ts: str | None, now_utc: datetime, settings) -> bool:
-    """True if an Agent: Auto-Updated label is older than quarantine_days."""
+    """True if an Agent: Auto-Updated label is older than optimistic_label_days.
+
+    (The old quarantine_days window is gone; the Auto-Updated label — a purely
+    cosmetic "the agent touched this" marker — expires on the same short window
+    as optimistic time-based labels.)
+    """
     d = days_since(applied_ts, now_utc, settings.tz_standard_offset, settings.tz_daylight_offset)
-    return d is not None and d >= settings.quarantine_days
+    return d is not None and d >= settings.optimistic_label_days
 
 
-def quarantine_expired(entered_ts: str | None, now_utc: datetime, settings) -> bool:
-    """True if a quarantined card has been untouched for quarantine_days."""
+def archive_list_expired(entered_ts: str | None, now_utc: datetime, settings) -> bool:
+    """True if a card has sat in the Agent Archive list longer than archive_list_days.
+
+    Such a card is then archived via Trello's built-in (restorable) archive.
+    """
     d = days_since(entered_ts, now_utc, settings.tz_standard_offset, settings.tz_daylight_offset)
-    return d is not None and d >= settings.quarantine_days
+    return d is not None and d >= settings.archive_list_days
 
 
 def proposal_expired(opened_ts: str | None, now_utc: datetime, settings) -> bool:
@@ -220,15 +228,25 @@ def is_never_touch(
     settings,
     in_scope_list_ids: set[str],
     open_proposed_card_ids: set[str],
-    report_card_id: str | None,
+    protected_card_ids=None,
 ) -> bool:
     """True if the card must never be edited this run.
 
-    Never touch: the Grooming Report card, any card edited within no_touch_hours,
-    any card carrying an open Agent: Proposed decision, anything out of edit scope.
+    Never touch: protected cards (the Grooming Report card and the weekly
+    spine-review reminder card), any card edited within no_touch_hours, any card
+    carrying an open Agent: Proposed decision, anything out of edit scope.
+
+    protected_card_ids may be a set of ids or a single id string (or None). When
+    no_touch_hours is 0 the no-touch window is disabled, but the open-proposal
+    lock and out-of-scope guard here (and the rejection ledger elsewhere) still
+    protect their cards.
     """
-    if report_card_id is not None and card.id == report_card_id:
-        return True
+    if protected_card_ids is not None:
+        if isinstance(protected_card_ids, str):
+            if card.id == protected_card_ids:
+                return True
+        elif card.id in protected_card_ids:
+            return True
     if card.id in open_proposed_card_ids or card.has_label(settings.label_proposed):
         return True
     if card.list_id not in in_scope_list_ids:
@@ -236,6 +254,21 @@ def is_never_touch(
     if edited_within_no_touch(card.last_activity, now_utc, settings):
         return True
     return False
+
+
+def value_written_in_sources(value: str | None, source_texts) -> bool:
+    """True if a verbatim substring `value` appears in any source text.
+
+    Used to enforce "re-date only from a date written in the card text or the
+    spine" — the LLM must cite the exact substring it read the new date from, and
+    Python confirms that substring is really present before trusting the new date.
+    """
+    if not value:
+        return False
+    needle = value.strip().lower()
+    if not needle:
+        return False
+    return any(needle in (t or "").lower() for t in source_texts)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +295,7 @@ def apply_cap(items: list, cap: int, priority=None) -> tuple[list, list]:
 def merge_contains_all_sources(survivor_desc: str, source_cards) -> bool:
     """Verify the survivor description contains every source card's name and desc.
 
-    String-containment check enforced before any losing card moves to quarantine.
+    String-containment check enforced before any losing card moves to the archive.
     """
     for src in source_cards:
         if src.name and src.name not in survivor_desc:
@@ -307,24 +340,52 @@ TIER1 = 1
 TIER2 = 2
 
 
+def is_borderline(action: dict, settings) -> bool:
+    """True if an auto-eligible action is borderline and should be Proposed instead.
+
+    Borderline when the LLM flags it (`borderline: true`) or reports a confidence
+    below `auto_min_confidence`. A missing confidence is treated as NOT borderline
+    (deterministic actions the LLM did not score still auto-execute).
+    """
+    if action.get("borderline"):
+        return True
+    conf = action.get("confidence")
+    if conf is None:
+        return False
+    try:
+        return int(conf) < settings.auto_min_confidence
+    except (TypeError, ValueError):
+        return True
+
+
 def assign_tier(action: dict, settings) -> int:
     """Return the enforced tier (1 or 2) for an action after LLM judgment.
 
     Forced-Tier-2 conditions on merges override any LLM/heuristic Tier-1 call.
-    The two manual toggles (tier1_stale_label_removal, tier1_recovery_archive)
-    default False → those actions are Tier 2.
+    The category toggles (tier1_stale_label_removal, tier1_recovery_archive,
+    tier1_due_date_clear) gate auto-execution: when the toggle is True the action
+    is Tier 1 unless it is borderline (then Tier 2); when False the whole category
+    is Tier 2 (Agent: Proposed).
     """
     atype = action.get("type")
 
-    # Always Tier 1 (loss-free by construction / §5.1 dead-due clears).
-    if atype in ("rename", "desc_restructure", "dead_due_clear"):
+    # Always Tier 1 (loss-free by construction).
+    if atype in ("rename", "desc_restructure"):
         return TIER1
 
-    # Manual toggles.
+    # Category toggles — auto only when the flag is on AND the call isn't borderline.
+    if atype in ("dead_due_clear", "due_redate"):
+        if settings.tier1_due_date_clear and not is_borderline(action, settings):
+            return TIER1
+        return TIER2
     if atype == "stale_label_removal":
-        return TIER1 if settings.tier1_stale_label_removal else TIER2
+        if settings.tier1_stale_label_removal and not is_borderline(action, settings):
+            return TIER1
+        return TIER2
     if atype == "recovery_archive":
-        return TIER1 if settings.tier1_recovery_archive else TIER2
+        if settings.tier1_recovery_archive and not is_borderline(action, settings):
+            return TIER1
+        return TIER2
 
     # Recovery routing to a list is a Tier 1 auto action.
     if atype in ("recovery_route_today", "recovery_route_nfd", "recovery_route_inbox"):

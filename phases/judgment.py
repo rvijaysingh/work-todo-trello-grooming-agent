@@ -168,7 +168,9 @@ def _render_spine(spine) -> str:
         return "(no spine)"
     lines = ["Active Workstreams:"]
     for w in spine.workstreams:
-        lines.append(f"- {w.name} [{w.status}]: {w.context}")
+        ts = "Yes" if getattr(w, "time_sensitive", False) else "No"
+        pri = getattr(w, "priority", "Normal")
+        lines.append(f"- {w.name} [{w.status}] (Priority: {pri}, Time-sensitive: {ts}): {w.context}")
     lines.append("People:")
     for p in spine.people:
         lines.append(f"- {p.name} ({p.role}): {p.context}")
@@ -241,6 +243,27 @@ def classify_due(llm, prompt_loader, system_prefix, due_payload, known_ids,
     text = call_llm(llm, prompt, system_prefix, max_tokens=max_tokens)
     items = extract_items(parse_json(text), "classifications")
     valid, _ = validate_items(items, known_ids, ["card_id", "due_status"], ["card_id"])
+    return valid
+
+
+def classify_inscope_archive(llm, prompt_loader, system_prefix, inscope_payload, known_ids,
+                             max_tokens=4000):
+    """In-scope 'no longer needed' archive candidates. Returns validated verdicts:
+    {card_id, reason, confidence, borderline}."""
+    prompt = prompt_loader.load("inscope_archive.md", {"inscope_json": json.dumps(inscope_payload)})
+    text = call_llm(llm, prompt, system_prefix, max_tokens=max_tokens)
+    items = extract_items(parse_json(text), "archives")
+    valid, _ = validate_items(items, known_ids, ["card_id"], ["card_id"])
+    return valid
+
+
+def classify_labels(llm, prompt_loader, system_prefix, labels_payload, known_ids, max_tokens=3000):
+    """Stale-label disposition (swap vs remove). Returns validated verdicts:
+    {card_id, disposition, target_label?, reason, confidence, borderline}."""
+    prompt = prompt_loader.load("labels.md", {"labels_json": json.dumps(labels_payload)})
+    text = call_llm(llm, prompt, system_prefix, max_tokens=max_tokens)
+    items = extract_items(parse_json(text), "labels")
+    valid, _ = validate_items(items, known_ids, ["card_id", "disposition"], ["card_id"])
     return valid
 
 

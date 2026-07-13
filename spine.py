@@ -40,6 +40,8 @@ class Workstream:
     name: str
     status: str = ""
     context: str = ""
+    priority: str = "Normal"        # High / Normal / Low (default Normal)
+    time_sensitive: bool = False    # from "Time-sensitive: Yes/No" (default No)
 
 
 @dataclass
@@ -77,6 +79,12 @@ class SpineData:
                 return w.status
         return None
 
+    def workstream(self, name: str) -> "Workstream | None":
+        for w in self.workstreams:
+            if w.name.lower() == name.lower():
+                return w
+        return None
+
     def done_workstream_names(self) -> list[str]:
         return [w.name for w in self.workstreams if w.status.lower() in ("done", "winding down")]
 
@@ -98,6 +106,8 @@ def load_spine_from_dict(d: dict) -> SpineData:
             name=str(w.get("name", "")),
             status=str(w.get("status", "")),
             context=str(w.get("context", "")),
+            priority=str(w.get("priority", "Normal")) or "Normal",
+            time_sensitive=_as_bool(w.get("time_sensitive", False)),
         )
         for w in d.get("workstreams", [])
     ]
@@ -128,6 +138,39 @@ def _plain_text(block: dict) -> str:
     payload = block.get(btype, {})
     rich = payload.get("rich_text", []) if isinstance(payload, dict) else []
     return "".join(rt.get("plain_text", "") for rt in rich).strip()
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("yes", "true", "1", "on")
+
+
+_ATTR_RE = None  # compiled lazily below
+
+
+def _parse_workstream_attrs(context: str) -> tuple[str, bool, str]:
+    """Extract 'Priority: X' and 'Time-sensitive: Y' from a workstream's context.
+
+    Returns (priority, time_sensitive, remaining_context). Defaults: Normal / No.
+    The matched attribute clauses are stripped from the returned context.
+    """
+    import re
+
+    priority = "Normal"
+    time_sensitive = False
+    remaining = context or ""
+
+    m = re.search(r"priority\s*:\s*(high|normal|low)", remaining, re.IGNORECASE)
+    if m:
+        priority = m.group(1).capitalize()
+        remaining = remaining[: m.start()] + remaining[m.end():]
+    m = re.search(r"time[\s-]*sensitive\s*:\s*(yes|no|true|false)", remaining, re.IGNORECASE)
+    if m:
+        time_sensitive = m.group(1).lower() in ("yes", "true")
+        remaining = remaining[: m.start()] + remaining[m.end():]
+    remaining = remaining.strip(" .;—-").strip()
+    return priority, time_sensitive, remaining
 
 
 def _split_entry(text: str) -> tuple[str, str, str]:
@@ -167,7 +210,10 @@ def parse_spine_blocks(blocks: list[dict]) -> SpineData:
         if btype in ("bulleted_list_item", "numbered_list_item", "paragraph"):
             if section == "workstreams":
                 name, status, context = _split_entry(text)
-                spine.workstreams.append(Workstream(name=name, status=status, context=context))
+                priority, time_sensitive, context = _parse_workstream_attrs(context)
+                spine.workstreams.append(Workstream(
+                    name=name, status=status, context=context,
+                    priority=priority, time_sensitive=time_sensitive))
             elif section == "people":
                 name, role, context = _split_entry(text)
                 spine.people.append(Person(name=name, role=role, context=context))
@@ -238,6 +284,7 @@ _OVERRIDE_TYPES: dict[str, str] = {
     "max_merges_per_run": "int",
     "max_renames_per_run": "int",
     "max_recoveries_per_run": "int",
+    "max_inscope_archives_per_run": "int",
     "max_proposals_open": "int",
     "auto_min_confidence": "int",
     "auto_pause_after_failures": "int",

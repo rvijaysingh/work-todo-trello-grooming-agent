@@ -24,6 +24,7 @@
   "max_merges_per_run": 10,
   "max_renames_per_run": 15,
   "max_recoveries_per_run": 15,
+  "max_inscope_archives_per_run": 10,
   "max_proposals_open": 20,
 
   "tier1_stale_label_removal": true,

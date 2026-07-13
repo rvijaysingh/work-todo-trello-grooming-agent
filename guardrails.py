@@ -218,6 +218,18 @@ def is_time_based_label(label_name: str) -> bool:
     return bool(_TIME_LABEL_RE.match(label_name))
 
 
+_OWNER_TITLE_RE = re.compile(r"^\s*\[\s*owner\s*:", re.IGNORECASE)
+
+
+def is_owner_titled(name: str) -> bool:
+    """True for cards whose title is of the form '[Owner: Name] ...'.
+
+    Such cards are delegated/handed-off items and are archive candidates under the
+    'no longer needed' test (design §4).
+    """
+    return bool(_OWNER_TITLE_RE.match(name or ""))
+
+
 # ---------------------------------------------------------------------------
 # Never-touch filter (design.md §6)
 # ---------------------------------------------------------------------------
@@ -378,11 +390,11 @@ def assign_tier(action: dict, settings) -> int:
         if settings.tier1_due_date_clear and not is_borderline(action, settings):
             return TIER1
         return TIER2
-    if atype == "stale_label_removal":
+    if atype in ("stale_label_removal", "label_swap"):
         if settings.tier1_stale_label_removal and not is_borderline(action, settings):
             return TIER1
         return TIER2
-    if atype == "recovery_archive":
+    if atype in ("recovery_archive", "inscope_archive"):
         if settings.tier1_recovery_archive and not is_borderline(action, settings):
             return TIER1
         return TIER2

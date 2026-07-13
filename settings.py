@@ -60,6 +60,7 @@ class AgentSettings:
     max_merges_per_run: int
     max_renames_per_run: int
     max_recoveries_per_run: int
+    max_inscope_archives_per_run: int
     max_proposals_open: int
     tier1_stale_label_removal: bool
     tier1_recovery_archive: bool
@@ -165,6 +166,7 @@ def load_settings(agent_config_path: str) -> AgentSettings:
             max_merges_per_run=int(req("max_merges_per_run")),
             max_renames_per_run=int(req("max_renames_per_run")),
             max_recoveries_per_run=int(req("max_recoveries_per_run")),
+            max_inscope_archives_per_run=int(req("max_inscope_archives_per_run")),
             max_proposals_open=int(req("max_proposals_open")),
             tier1_stale_label_removal=bool(req("tier1_stale_label_removal")),
             tier1_recovery_archive=bool(req("tier1_recovery_archive")),
@@ -233,6 +235,7 @@ def _validate_settings(s: AgentSettings) -> None:
         ("max_merges_per_run", s.max_merges_per_run),
         ("max_renames_per_run", s.max_renames_per_run),
         ("max_recoveries_per_run", s.max_recoveries_per_run),
+        ("max_inscope_archives_per_run", s.max_inscope_archives_per_run),
         ("max_proposals_open", s.max_proposals_open),
     ):
         if val < 0:

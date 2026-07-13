@@ -49,7 +49,7 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     if result.still_overdue:
         for s in result.still_overdue:
             reason = f" — {s['reason']}" if s.get("reason") else ""
-            lines.append(f"  - {s['name']} (due {s['due']}){reason}")
+            lines.append(f"  - {_ref(s.get('name'), s.get('url'))} (due {s['due']}){reason}")
     else:
         lines.append("  (none)")
     lines.append("")
@@ -58,7 +58,14 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     lines.append("== Awaiting your decision ==")
     if result.proposals_opened:
         for p in result.proposals_opened:
-            lines.append(f"  - [{p['type']}] proposal #{p['proposal_id']} — reply 'yes'/'approve' or remove the label")
+            lines.append(f"  - {_ref(p.get('title'), p.get('url'))}")
+            lines.append(f"      proposed: {p.get('action_desc', p.get('type'))}")
+            if p.get("reason"):
+                lines.append(f"      reason: {p['reason']}")
+            conf = p.get("confidence")
+            lines.append(f"      Confidence: {int(conf)}%" if conf is not None
+                         else "      Confidence: n/a")
+            lines.append("      → reply 'yes'/'approve' on the card, or remove the label to reject")
     else:
         lines.append("  (none)")
     if result.expired_proposals:
@@ -68,22 +75,24 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
 
     # 3. Recently archived ----------------------------------------------------
     lines.append("== Recently archived ==")
-    lines.append("  (cards moved to the Agent Archive list this run, and cards nearing "
-                 "their 60-day move to Trello's archive (restorable))")
+    lines.append(f"  (cards moved to the Agent Archive list this run — visible "
+                 f"{settings.archive_list_days} days — and cards nearing their move to "
+                 f"Trello's archive (restorable))")
     if result.recently_archived:
         for a in result.recently_archived:
-            lines.append(f"  - {a['name']} — {a.get('note', '')}")
+            lines.append(f"  - {_ref(a.get('name'), a.get('url'))} — {a.get('note', '')}")
     else:
         lines.append("  (none)")
     lines.append("")
 
     # 4. Done automatically ---------------------------------------------------
     lines.append("== Done automatically ==")
+    verb = _verbs(dry_run)
     if result.reminder_created:
-        lines.append("  - created the weekly spine-review reminder card")
+        lines.append(f"  - {verb['create']} the weekly spine-review reminder card")
     if result.applied:
         for a in result.applied:
-            lines.append(f"  - {_describe(a, board)}")
+            lines.append(f"  - {_describe(a, board, verb)}")
     if not result.applied and not result.reminder_created:
         lines.append("  (none)")
     if result.demoted_recoveries:
@@ -111,16 +120,64 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     return "\n".join(lines) + "\n"
 
 
-def _describe(action: dict, board) -> str:
+def _truncate(text: str, limit: int = 60) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _ref(title, url) -> str:
+    """Render a card as 'truncated title (url)' — never a bare id."""
+    label = _truncate(title or "(untitled)")
+    return f"{label} ({url})" if url else label
+
+
+def _card_ref(board, card_id: str) -> str:
+    card = board.card_by_id(card_id) if card_id else None
+    if card is None:
+        return _truncate(card_id)
+    return _ref(card.name, card.url)
+
+
+def _verbs(dry_run: bool) -> dict:
+    """Verb forms so dry-run reads 'would create/move/remove/clear', live reads past tense."""
+    if dry_run:
+        return {"create": "would create", "move": "would move", "remove": "would remove",
+                "rename": "would rename", "clear": "would clear/re-date", "merge": "would merge",
+                "archive": "would move to Trello's archive"}
+    return {"create": "created", "move": "moved", "remove": "removed",
+            "rename": "renamed", "clear": "cleared/re-dated", "merge": "merged",
+            "archive": "moved to Trello's archive"}
+
+
+def _describe(action: dict, board, verb: dict) -> str:
     t = action.get("type")
     cid = action.get("card_id") or action.get("survivor_id", "")
-    card = board.card_by_id(cid) if cid else None
-    link = f" ({card.url})" if card and card.url else ""
+    ref = _card_ref(board, cid)
     if t == "merge":
-        return f"merge → survivor {action.get('survivor_id')} ({len(action.get('loser_ids', []))} loser(s)){link}"
+        n = len(action.get("loser_ids", []))
+        return f"{verb['merge']} {n} duplicate(s) into survivor {ref}"
     if t == "rename":
-        return f"rename {cid} → {action.get('new_name')}{link}"
-    return f"{t} {cid}{link}"
+        return f"{verb['rename']} {ref} → '{action.get('new_name')}'"
+    if t == "stale_label_removal":
+        lbl = action.get("label", "a stale label")
+        return f"{verb['remove']} label '{lbl}' from {ref}"
+    if t == "dead_due_clear":
+        return f"{verb['clear']} the long-overdue due date on {ref}"
+    if t == "due_redate":
+        return f"{verb['clear']} the overdue due date on {ref} (new due {action.get('new_due')})"
+    if t == "recovery_route":
+        return f"{verb['move']} {ref} from {action.get('origin','?')} → {action.get('dest','?')} (recovered)"
+    if t == "recovery_archive":
+        return f"{verb['move']} {ref} to the Agent Archive list (recovered, no longer needed)"
+    if t == "recovery_merge":
+        return f"{verb['merge']} recovered {ref} into an active card"
+    if t == "trello_archive":
+        return f"{verb['archive']} {ref} (60+ days in the Agent Archive list)"
+    if t == "label_expiry":
+        return f"{verb['remove']} the aged Agent: Auto-Updated label from {ref}"
+    if t and t.startswith("approved_"):
+        return f"executed approved proposal ({t[len('approved_'):]}) on {ref}"
+    return f"{t} {ref}"
 
 
 def write_report_file(text: str, path: str) -> None:

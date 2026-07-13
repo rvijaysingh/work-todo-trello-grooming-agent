@@ -175,6 +175,11 @@ def _render_spine(spine) -> str:
     lines.append("Notes:")
     for n in spine.notes:
         lines.append(f"- {n}")
+    naming = getattr(spine, "naming_standard", None)
+    if naming:
+        lines.append("Card naming standard (follow these when renaming):")
+        for n in naming:
+            lines.append(f"- {n}")
     return "\n".join(lines)
 
 

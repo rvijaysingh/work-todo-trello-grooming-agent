@@ -99,7 +99,7 @@ def fetch_board(trello, settings) -> BoardView:
 def resolve_ids_or_fail(board: BoardView, settings) -> None:
     """Verify every configured list/label name resolves; raise if any is missing."""
     missing = []
-    for name in settings.comparison_scope_lists + [settings.quarantine_list, settings.report_list]:
+    for name in settings.comparison_scope_lists + [settings.report_list]:
         if board.list_by_name(name) is None:
             missing.append(f"list '{name}'")
     for label in (settings.label_auto_updated, settings.label_proposed):
@@ -114,11 +114,13 @@ def resolve_ids_or_fail(board: BoardView, settings) -> None:
 # ---------------------------------------------------------------------------
 
 def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
-                 llm=None, prompts=None, spine=None, trello=None, judgments=None):
+                 llm=None, prompts=None, spine=None, trello=None, judgments=None,
+                 notion_notes=None):
     """Run phases 1–5 over an already-fetched board. Returns (result, report_text).
 
     judgments (optional): {'clusters': [...], 'hygiene': [...], 'recovery': [...]}
     lets tests inject LLM verdicts deterministically, bypassing the LLM calls.
+    notion_notes (optional): report lines from applying spine "Rules" overrides.
     """
     now_iso = now_utc.astimezone(timezone.utc).isoformat() if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc).isoformat()
     run_id = now_iso
@@ -126,21 +128,27 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     prev_run_id = storage.latest_prior_run_id(db_path, run_id)
     prev_snapshot = storage.get_snapshot(db_path, prev_run_id) if prev_run_id else {}
     prior_actions = storage.get_actions(db_path, run_id=prev_run_id) if prev_run_id else []
-    quarantine = board.list_by_name(settings.quarantine_list)
-    quarantine_id = quarantine.id if quarantine else None
 
     result = ex.ExecutionResult()
+    result.notion_notes = list(notion_notes or [])
     mutator = ex.BoardMutator(trello, dry_run)
 
+    # Ensure the single Agent Archive list exists (auto-created, positioned last).
+    archive_list = ex.ensure_archive_list(board, settings, mutator)
+    archive_list_id = archive_list.id if archive_list else None
+
+    # Weekly spine-review reminder (created before candidate gen so it's protected).
+    ex.maybe_create_spine_reminder(db_path, mutator, board, settings, spine, now_utc, result)
+
     # Phase 1 — diff
-    rejections = sd.detect_implicit_rejections(prev_snapshot, board, prior_actions, settings, quarantine_id)
+    rejections = sd.detect_implicit_rejections(prev_snapshot, board, prior_actions, settings, archive_list_id)
     open_proposals = storage.get_open_proposals(db_path)
     approvals = sd.parse_approvals(board, open_proposals, settings)
 
     ex.process_rejections(db_path, mutator, board, rejections, settings, now_iso, result)
     ex.expire_proposals(db_path, board, open_proposals, settings, now_utc, now_iso, result)
     ex.process_approvals(db_path, mutator, board, approvals, settings, now_utc, now_iso, result)
-    ex.expire_labels_and_quarantine(mutator, board, settings, now_utc, result)
+    ex.expire_labels_and_archive(db_path, mutator, board, settings, now_utc, result)
 
     # Phase 2 — candidates
     entity_keywords = cand.build_entity_keywords(settings, spine)
@@ -164,11 +172,16 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
 
     # Phase 4 — execute
     flagged_ids = {c.id for c in hyg["flagged_renames"]}
+    dead_due_ids = {c.id for c in hyg["dead_dues"]}
+    spine_terms = spine.all_terms() if spine else []
     tier2_merges = ex.execute_merges(db_path, mutator, board, cluster_verdicts, settings, now_utc, now_iso, result)
-    ex.execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings, now_utc, now_iso, result)
+    tier2_due = ex.execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings,
+                                   now_utc, now_iso, result, dead_due_ids=dead_due_ids, spine_terms=spine_terms)
+    tier2_stale = ex.execute_stale_labels(db_path, mutator, board, hyg["stale_labels"], settings,
+                                          now_utc, now_iso, result)
     tier2_archives = ex.execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_iso, result)
 
-    tier2_actions = _collect_tier2(board, settings, tier2_merges, tier2_archives, hyg, cluster_verdicts)
+    tier2_actions = _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tier2_stale)
     ex.generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso, result)
 
     # Phase 5 — report
@@ -212,28 +225,28 @@ def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity
     }
 
 
-def _collect_tier2(board, settings, tier2_merges, tier2_archives, hyg, cluster_verdicts):
-    """Build Tier-2 action dicts (merges, stale-label removals, recovery archives)."""
+def _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tier2_stale):
+    """Assemble Tier-2 action dicts to become Agent: Proposed cards.
+
+    tier2_due and tier2_stale are already full action dicts (with confidence and
+    reason); merges and recovery archives are converted from verdicts here.
+    """
     actions = []
     for v in tier2_merges:
         cids = v.get("cluster_ids", [])
         actions.append({
             "type": "merge", "card_ids": cids, "new_name": v.get("new_name"),
             "survivor_id": v.get("survivor_id"), "anchor_card_id": v.get("survivor_id"),
+            "confidence": v.get("confidence"),
             "reason": v.get("reason", "Likely duplicate — recommend merging (review)."),
         })
-    if not settings.tier1_stale_label_removal:
-        for card, label in hyg["stale_labels"]:
-            lid = board.label_id(label)
-            actions.append({
-                "type": "stale_label_removal", "card_ids": [card.id], "label_id": lid,
-                "anchor_card_id": card.id,
-                "reason": f"Stale time-based label '{label}' — recommend removing (review).",
-            })
+    actions.extend(tier2_due)
+    actions.extend(tier2_stale)
     for v in tier2_archives:
         actions.append({
             "type": "recovery_archive", "card_ids": [v["card_id"]], "anchor_card_id": v["card_id"],
-            "reason": v.get("reason", "Appears obsolete — recommend archiving (review)."),
+            "confidence": v.get("confidence"),
+            "reason": v.get("reason", "Appears no longer needed — recommend archiving (review)."),
         })
     return actions
 
@@ -334,8 +347,16 @@ def run(argv=None) -> int:
             logger.warning("Spine read failed (%s); continuing without spine", exc)
             spine = None
 
+        # Live config: spine "Rules and thresholds" overrides this run's settings.
+        from spine import apply_notion_overrides
+        notion_notes, dry_run_from_notion = apply_notion_overrides(settings, spine)
+        if dry_run_from_notion:
+            logger.info("dry_run set to true by the Notion Rules section")
+        dry_run = settings.dry_run or args.dry_run or dry_run_from_notion
+
         run_pipeline(board, settings, settings.db_path, now_utc, dry_run, first_run,
-                     llm=llm, prompts=prompts, spine=spine, trello=trello)
+                     llm=llm, prompts=prompts, spine=spine, trello=trello,
+                     notion_notes=notion_notes)
         storage.record_success(settings.db_path, now_iso)
         logger.info("Run complete (dry_run=%s)", dry_run)
         return 0

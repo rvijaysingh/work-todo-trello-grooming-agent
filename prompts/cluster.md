@@ -15,6 +15,11 @@ For each cluster you judge to be duplicates, return one verdict object with:
 - "merged_desc": a short note on what to consolidate (optional)
 - "exact_or_near_name_match": true if the names are exact/near-exact matches
 - "llm_tier": 1 if you are highly confident and the merge is safe, else 2
-- "reason": one line
+- "confidence": integer 0–100 — your confidence in this merge
+- "borderline": true if the user should confirm before merging
+- "reason": one line (shown to the user verbatim)
+
+Merged-away duplicate cards move to the top of the Agent Archive list — describe
+this as "moved to Trello's archive (restorable)", never as deletion.
 
 Return: {{"verdicts": [ ... ]}}

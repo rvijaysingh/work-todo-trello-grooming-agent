@@ -118,7 +118,7 @@ def snapshot_rows(board: BoardView):
 # ---------------------------------------------------------------------------
 
 def detect_implicit_rejections(prev_snapshot: dict, board: BoardView, prior_actions,
-                               settings, quarantine_list_id: str | None):
+                               settings, archive_list_id: str | None):
     """Detect cards the agent touched last run that Vijay has since overridden.
 
     Returns a list of rejection dicts:
@@ -154,13 +154,13 @@ def detect_implicit_rejections(prev_snapshot: dict, board: BoardView, prior_acti
             if settings.label_auto_updated in now.label_names and source == "edit":
                 remove_label = True
 
-        # Quarantine pull-back: a loser dragged back out of quarantine.
-        if quarantine_list_id and act["action_type"] in ("merge", "recovery_merge"):
+        # Archive-list pull-back: a loser dragged back out of the Agent Archive list.
+        if archive_list_id and act["action_type"] in ("merge", "recovery_merge"):
             for lid in payload.get("loser_ids", []):
                 prevL = prev_snapshot.get(lid)
                 nowL = board.card_by_id(lid)
-                if prevL and nowL and prevL.get("list_id") == quarantine_list_id \
-                        and nowL.list_id != quarantine_list_id:
+                if prevL and nowL and prevL.get("list_id") == archive_list_id \
+                        and nowL.list_id != archive_list_id:
                     source = source or "edit"
 
         if source is not None:

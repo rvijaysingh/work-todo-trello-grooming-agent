@@ -5,7 +5,8 @@ Python enforces every guardrail (design.md §6) AFTER LLM judgment and BEFORE an
 Trello write. All mutations go through BoardMutator, which performs zero board
 writes in dry-run mode (the report is still produced). Tier 1 actions execute;
 Tier 2 actions become Agent: Proposed cards; nothing is ever hard-deleted and
-nothing reaches Trello's archive without passing through the quarantine list.
+nothing reaches Trello's built-in archive without first passing through the
+single Agent Archive list.
 """
 
 from __future__ import annotations
@@ -56,6 +57,11 @@ class BoardMutator:
             # Empty string clears the due date via the Trello API.
             self.trello.update_card(card_id, due_date="")
 
+    def set_due(self, card_id: str, due_iso: str) -> None:
+        self._record("set_due", card_id=card_id, due=due_iso)
+        if not self.dry_run:
+            self.trello.update_card(card_id, due_date=due_iso)
+
     def set_labels(self, card_id: str, label_ids: list[str]) -> None:
         self._record("set_labels", card_id=card_id, label_ids=list(label_ids))
         if not self.dry_run:
@@ -67,7 +73,7 @@ class BoardMutator:
             self.trello.add_comment(card_id, text)
 
     def move_card(self, card_id: str, target_list_id: str, position="top") -> None:
-        self._record("move_card", card_id=card_id, target_list_id=target_list_id)
+        self._record("move_card", card_id=card_id, target_list_id=target_list_id, position=position)
         if not self.dry_run:
             self.trello.move_card(card_id, target_list_id, position)
 
@@ -82,18 +88,55 @@ class BoardMutator:
             return self.trello.create_card(list_id, name, description)
         return {"id": "dry-run", "url": ""}
 
+    def create_list(self, name: str, position: str = "bottom") -> dict:
+        self._record("create_list", name=name, position=position)
+        if not self.dry_run:
+            lst = self.trello.create_list(name, position)
+            return {"id": lst.id, "name": lst.name, "pos": lst.position}
+        return {"id": "dry-run-archive-list", "name": name, "pos": 9999.0}
+
 
 @dataclass
 class ExecutionResult:
     applied: list = field(default_factory=list)
     proposals_opened: list = field(default_factory=list)
     rejections_recorded: list = field(default_factory=list)
-    quarantine_items: list = field(default_factory=list)
+    recently_archived: list = field(default_factory=list)   # moved this run + approaching 60d
+    still_overdue: list = field(default_factory=list)        # dead-due but still matters
     recoveries: list = field(default_factory=list)
     demoted_recoveries: list = field(default_factory=list)
     expired_proposals: list = field(default_factory=list)
+    reminder_created: bool = False
+    notion_notes: list = field(default_factory=list)         # Notion Rules override notes
     notes: list = field(default_factory=list)
     counters: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Agent Archive list — single-list lifecycle (replaces the old quarantine list)
+# ---------------------------------------------------------------------------
+
+ARCHIVE_MOVED_WORDING = "moved to Trello's archive (restorable)"
+
+
+def ensure_archive_list(board, settings, mutator):
+    """Return the Agent Archive list, creating it (positioned last) if absent.
+
+    The list is excluded from edit, dedup-comparison, and recovery scopes by
+    virtue of not being named in any of those config fields and not matching the
+    recovery include pattern.
+    """
+    lst = board.list_by_name(settings.archive_list_name)
+    if lst is not None:
+        return lst
+    from models import ListInfo
+
+    created = mutator.create_list(settings.archive_list_name, position="bottom")
+    info = ListInfo(id=created["id"], name=created.get("name", settings.archive_list_name),
+                    closed=False, pos=float(created.get("pos", 9999.0)))
+    board.lists.append(info)
+    logger.info("Created Agent Archive list %s", info.id)
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -160,36 +203,44 @@ def expire_proposals(db_path, board, open_proposals, settings, now_utc, now_iso,
 # Quarantine lifecycle
 # ---------------------------------------------------------------------------
 
-def expire_labels_and_quarantine(mutator, board, settings, now_utc, result):
-    """Strip aged Auto-Updated labels; auto-archive aged quarantined cards.
+def expire_labels_and_archive(db_path, mutator, board, settings, now_utc, result):
+    """Strip aged Auto-Updated labels; Trello-archive aged Agent Archive cards.
 
-    Uses each card's last_activity as the age proxy: an untouched agent-labeled
-    or quarantined card's last_activity reflects when the agent last touched it.
+    Cards in the Agent Archive list that have sat there longer than
+    archive_list_days are archived via Trello's built-in (restorable) archive.
+    Entry timestamps come from the SQLite archive_ledger (falling back to
+    last_activity for any card lacking a ledger entry). Cards within ~10 days of
+    their archive date are surfaced under "Recently archived" in the report.
     """
-    quarantine = board.list_by_name(settings.quarantine_list)
+    archive_list = board.list_by_name(settings.archive_list_name)
     auto_id = board.label_id(settings.label_auto_updated)
 
     for card in board.cards:
         if card.closed:
             continue
-        # Label expiry
+        # Auto-Updated label expiry (cosmetic marker only).
         if auto_id and card.has_label(settings.label_auto_updated):
             if g.label_expired(card.last_activity, now_utc, settings):
                 remaining = [lid for lid in card.label_ids if lid != auto_id]
                 mutator.set_labels(card.id, remaining)
                 result.applied.append({"type": "label_expiry", "card_id": card.id})
-        # Quarantine lifecycle
-        if quarantine and card.list_id == quarantine.id:
-            if g.quarantine_expired(card.last_activity, now_utc, settings):
+        # Agent Archive list lifecycle.
+        if archive_list and card.list_id == archive_list.id:
+            entered = storage.archive_entry_ts(db_path, card.id) or card.last_activity
+            if g.archive_list_expired(entered, now_utc, settings):
                 mutator.archive_card(card.id)
-                result.applied.append({"type": "quarantine_archive", "card_id": card.id})
+                storage.remove_archive_entry(db_path, card.id)
+                result.applied.append({"type": "trello_archive", "card_id": card.id})
+                result.recently_archived.append({"card_id": card.id, "name": card.name,
+                                                 "note": ARCHIVE_MOVED_WORDING})
             else:
-                days_left = settings.quarantine_days - (
-                    g.days_since(card.last_activity, now_utc,
-                                 settings.tz_standard_offset, settings.tz_daylight_offset) or 0
-                )
-                result.quarantine_items.append({"card_id": card.id, "name": card.name,
-                                                "days_remaining": round(days_left, 1)})
+                days_in = g.days_since(entered, now_utc,
+                                       settings.tz_standard_offset, settings.tz_daylight_offset) or 0
+                days_left = settings.archive_list_days - days_in
+                if days_left <= 10:
+                    result.recently_archived.append(
+                        {"card_id": card.id, "name": card.name,
+                         "note": f"{round(days_left, 1)} day(s) until Trello archive"})
 
 
 # ---------------------------------------------------------------------------
@@ -199,26 +250,42 @@ def expire_labels_and_quarantine(mutator, board, settings, now_utc, result):
 def compose_survivor_desc(survivor, losers) -> str:
     """Build the consolidated survivor description (guarantees the merge invariant).
 
-    Contains the survivor's original title + description and, per source card, its
-    original name and full description text.
+    Holds task content only: the survivor's original title + description and, per
+    source card, its original name and full description text. Audit metadata
+    (links, "merged from" trail) lives in a card COMMENT, not the description, so
+    the string-containment invariant never depends on audit text.
     """
     parts = [f"Original title: {survivor.name}", ""]
     if survivor.desc:
         parts += [survivor.desc, ""]
     for loser in losers:
-        parts.append(f"--- Merged from: {loser.name} ({loser.url}) ---")
+        parts.append(f"From: {loser.name}")
         if loser.desc:
             parts.append(loser.desc)
         parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 
 
-def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -> bool:
-    """Execute one Tier-1 merge. Returns True if applied, False if blocked.
+def _merge_audit_comment(survivor, losers, verdict) -> str:
+    """The audit-trail comment (links + confidence) written to the survivor."""
+    src = ", ".join(f"{l.name} ({l.url or l.id})" for l in losers)
+    line = f"Merged in {len(losers)} duplicate(s): {src}. Sources {ARCHIVE_MOVED_WORDING}."
+    reason = verdict.get("reason")
+    if reason:
+        line += f" {reason}"
+    conf = verdict.get("confidence")
+    if conf is not None:
+        line += f" Confidence: {int(conf)}%."
+    return line
 
-    Enforces the merge string-containment invariant BEFORE moving any loser to
-    quarantine. Survivor keeps its own time-based labels; other labels are unioned
-    across sources. Losers move to quarantine (never archived directly).
+
+def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -> bool:
+    """Execute one merge. Returns True if applied, False if blocked.
+
+    Enforces the merge string-containment invariant BEFORE moving any loser. The
+    survivor keeps its own time-based labels; other labels are unioned across
+    sources. Losers move to the TOP of the Agent Archive list (never hard-deleted,
+    never Trello-archived directly), and their entry time is tracked in SQLite.
     """
     survivor = board.card_by_id(verdict["survivor_id"])
     if survivor is None:
@@ -237,9 +304,9 @@ def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -
         result.notes.append(f"Merge aborted (invariant) for {survivor.id}")
         return False
 
-    quarantine = board.list_by_name(settings.quarantine_list)
-    if quarantine is None:
-        result.notes.append("Quarantine list missing; merge aborted")
+    archive_list = board.list_by_name(settings.archive_list_name)
+    if archive_list is None:
+        result.notes.append("Agent Archive list missing; merge aborted")
         return False
 
     # Compose labels: survivor keeps its own time-based labels; union the rest.
@@ -255,16 +322,22 @@ def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -
     if auto_id and auto_id not in final_labels:
         final_labels.append(auto_id)
 
-    # Apply survivor mutations.
+    # Apply survivor mutations (description = task content; audit trail = comment).
     if verdict.get("new_name"):
         mutator.rename(survivor.id, verdict["new_name"])
     mutator.set_description(survivor.id, final_desc)
     mutator.set_labels(survivor.id, final_labels)
+    mutator.add_comment(survivor.id, _merge_audit_comment(survivor, losers, verdict))
 
-    # Move losers to quarantine with a link back to the survivor.
+    # Move losers to the TOP of the Agent Archive list with a link back.
     for loser in losers:
-        mutator.add_comment(loser.id, f"Merged into {survivor.url or survivor.id} by grooming agent.")
-        mutator.move_card(loser.id, quarantine.id)
+        mutator.add_comment(
+            loser.id,
+            f"Merged into {survivor.url or survivor.id}; {ARCHIVE_MOVED_WORDING}.")
+        mutator.move_card(loser.id, archive_list.id, position="top")
+        storage.add_archive_entry(db_path, loser.id, now_iso)
+        result.recently_archived.append({"card_id": loser.id, "name": loser.name,
+                                         "note": ARCHIVE_MOVED_WORDING})
 
     storage.record_action(
         db_path, now_iso, now_iso, g.TIER1, "merge",
@@ -284,7 +357,7 @@ def execute_merges(db_path, mutator, board, verdicts, settings, now_utc, now_iso
     """
     in_scope = _in_scope_ids(board, settings)
     open_proposed = {c.id for c in board.cards if c.has_label(settings.label_proposed)}
-    report_id = _report_card_id(board, settings)
+    protected = _protected_card_ids(board, settings)
 
     tier1, tier2 = [], []
     for v in verdicts:
@@ -302,7 +375,7 @@ def execute_merges(db_path, mutator, board, verdicts, settings, now_utc, now_iso
         survivor = board.card_by_id(v["survivor_id"])
         if survivor is None:
             continue
-        if g.is_never_touch(survivor, now_utc, settings, in_scope, open_proposed, report_id):
+        if g.is_never_touch(survivor, now_utc, settings, in_scope, open_proposed, protected):
             result.notes.append(f"Merge skipped (never-touch): {survivor.id}")
             continue
         execute_merge(db_path, mutator, board, v, settings, now_iso, result)
@@ -348,24 +421,30 @@ def _merge_action_facts(verdict, board, settings, in_scope_ids) -> dict:
 # ---------------------------------------------------------------------------
 
 def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings,
-                    now_utc, now_iso, result):
-    """Execute Tier-1 hygiene (renames, dead-due clears). Returns Tier-2 stale-label actions.
+                    now_utc, now_iso, result, dead_due_ids=None, spine_terms=None):
+    """Execute renames (Tier 1) and dead-due handling; return Tier-2 due actions.
 
-    Renames respect max_renames_per_run with heuristic-flagged names prioritized.
+    Renames respect max_renames_per_run with heuristic-flagged names prioritized;
+    each carries a comment (change explanation + Confidence). Dead-due cards are
+    classified against the spine: still-matters cards are never touched and
+    surfaced under "Still overdue"; no-longer-matters cards are re-dated ONLY from
+    a written source (else cleared), executed per tier1_due_date_clear /
+    borderline. The old date is always preserved in a comment.
     """
     in_scope = _in_scope_ids(board, settings)
     open_proposed = {c.id for c in board.cards if c.has_label(settings.label_proposed)}
-    report_id = _report_card_id(board, settings)
+    protected = _protected_card_ids(board, settings)
     auto_id = board.label_id(settings.label_auto_updated)
-
-    renames = [v for v in hygiene_verdicts if v.get("new_name")]
+    dead_due_ids = dead_due_ids or set()
+    spine_terms = spine_terms or []
 
     def touchable(card_id):
         card = board.card_by_id(card_id)
         return card is not None and not g.is_never_touch(
-            card, now_utc, settings, in_scope, open_proposed, report_id)
+            card, now_utc, settings, in_scope, open_proposed, protected)
 
-    renames = [v for v in renames if touchable(v["card_id"])]
+    # -- Renames (Tier 1) ---------------------------------------------------
+    renames = [v for v in hygiene_verdicts if v.get("new_name") and touchable(v["card_id"])]
     allowed, deferred = g.apply_cap(
         renames, settings.max_renames_per_run,
         priority=lambda v: v["card_id"] in flagged_ids,
@@ -374,26 +453,111 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         result.notes.append(f"Rename deferred by cap: {v['card_id']}")
     for v in allowed:
         card = board.card_by_id(v["card_id"])
+        old_name = card.name
         _apply_rename(mutator, board, card, v["new_name"], v.get("new_desc"), auto_id, settings)
+        mutator.add_comment(card.id, _change_comment(
+            f"Renamed from '{old_name}' to '{v['new_name']}'", v))
         storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
-                              {"new_name": v["new_name"], "original_name": card.name}, "success")
+                              {"new_name": v["new_name"], "original_name": old_name}, "success")
         result.applied.append({"type": "rename", "card_id": card.id, "new_name": v["new_name"]})
 
-    # Dead-due clears (Tier 1).
+    # -- Dead-due handling --------------------------------------------------
+    tier2_due = []
     for v in hygiene_verdicts:
-        if not v.get("clear_due"):
+        cid = v["card_id"]
+        if cid not in dead_due_ids and not v.get("clear_due") and not v.get("due_status"):
             continue
-        card = board.card_by_id(v["card_id"])
-        if not touchable(card.id) or not card.due:
+        card = board.card_by_id(cid)
+        if card is None or not card.due:
             continue
-        mutator.add_comment(card.id, f"Cleared dead due date (was {card.due}) — grooming agent.")
-        mutator.clear_due(card.id)
+
+        status = v.get("due_status")
+        if status == "still_matters":
+            # Never touched; surfaced in the report so it stays visible.
+            result.still_overdue.append({"card_id": cid, "name": card.name,
+                                         "due": card.due, "reason": v.get("reason", "")})
+            continue
+
+        # no_longer_matters (or legacy clear_due=True): re-date only from a written
+        # source, else clear. Validate the cited source substring is really present.
+        new_due = v.get("new_due")
+        source = v.get("new_due_source")
+        src_texts = [f"{card.name}\n{card.desc}"] + list(spine_terms)
+        redate = bool(new_due) and g.value_written_in_sources(source, src_texts)
+        action = {"type": "due_redate" if redate else "dead_due_clear",
+                  "card_ids": [cid], "anchor_card_id": cid,
+                  "confidence": v.get("confidence"), "borderline": v.get("borderline"),
+                  "new_due": new_due if redate else None,
+                  "reason": v.get("reason", "Due date long past.")}
+        tier = assign_tier(action, settings)
+        if tier == g.TIER2:
+            tier2_due.append(action)
+            continue
+        if not touchable(cid):
+            continue
+        if redate:
+            mutator.add_comment(cid, _change_comment(
+                f"Old due date was {card.due}; set new due {new_due} (from written source)", v))
+            mutator.set_due(cid, new_due)
+            atype = "due_redate"
+        else:
+            mutator.add_comment(cid, _change_comment(
+                f"Old due date was {card.due}; cleared it (long past, nothing left to do)", v))
+            mutator.clear_due(cid)
+            atype = "dead_due_clear"
         _add_label(mutator, card, auto_id)
-        storage.record_action(db_path, now_iso, now_iso, g.TIER1, "dead_due_clear", [card.id],
-                              {"original_due": card.due}, "success")
-        result.applied.append({"type": "dead_due_clear", "card_id": card.id})
+        storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
+                              {"original_due": card.due, "new_due": new_due if redate else None}, "success")
+        result.applied.append({"type": atype, "card_id": cid})
 
     result.counters["renames"] = sum(1 for a in result.applied if a["type"] == "rename")
+    return tier2_due
+
+
+def _change_comment(summary: str, verdict: dict) -> str:
+    """Format an auto-action comment: '<summary>. <reason> Confidence: NN%.'"""
+    line = summary.rstrip(".") + "."
+    reason = verdict.get("reason")
+    if reason and reason not in summary:
+        line += f" {reason.rstrip('.')}."
+    conf = verdict.get("confidence")
+    if conf is not None:
+        line += f" Confidence: {int(conf)}%."
+    return line
+
+
+def execute_stale_labels(db_path, mutator, board, stale_pairs, settings, now_utc, now_iso, result):
+    """Auto-remove stale time-based labels (Tier 1) or return them as Tier-2 actions.
+
+    stale_pairs: list of (card, label_name). These are detected deterministically,
+    so they carry confidence 100 (never borderline). Governed by
+    tier1_stale_label_removal.
+    """
+    in_scope = _in_scope_ids(board, settings)
+    open_proposed = {c.id for c in board.cards if c.has_label(settings.label_proposed)}
+    protected = _protected_card_ids(board, settings)
+    auto_id = board.label_id(settings.label_auto_updated)
+    tier2 = []
+    for card, label in stale_pairs:
+        lid = board.label_id(label)
+        action = {"type": "stale_label_removal", "card_ids": [card.id], "label_id": lid,
+                  "anchor_card_id": card.id, "confidence": 100,
+                  "reason": f"Time-based label '{label}' is stale (card not in the matching "
+                            f"list, applied long ago)."}
+        if assign_tier(action, settings) == g.TIER2:
+            tier2.append(action)
+            continue
+        if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected) or not lid:
+            continue
+        remaining = [x for x in card.label_ids if x != lid]
+        if auto_id and auto_id not in remaining:
+            remaining.append(auto_id)
+        mutator.set_labels(card.id, remaining)
+        mutator.add_comment(card.id, _change_comment(f"Removed stale label '{label}'", action))
+        storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
+                              [card.id], {"label": label}, "success")
+        result.applied.append({"type": "stale_label_removal", "card_id": card.id})
+    return tier2
 
 
 def _apply_rename(mutator, board, card, new_name, new_desc, auto_id, settings):
@@ -429,7 +593,7 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
     nfd_id = _role_list_id(board, settings, "next_few_days")
     week_id = _role_list_id(board, settings, "this_week")
     inbox_id = _role_list_id(board, settings, "inbox")
-    quarantine = board.list_by_name(settings.quarantine_list)
+    archive_list = board.list_by_name(settings.archive_list_name)
 
     today_count = 0
     executed = 0
@@ -446,16 +610,21 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
         origin = card.list_name
 
         if disp == "archive":
-            action = {"type": "recovery_archive"}
+            action = {"type": "recovery_archive", "confidence": v.get("confidence"),
+                      "borderline": v.get("borderline")}
             if assign_tier(action, settings) == g.TIER2:
                 tier2_archives.append(v)
                 continue
-            # Tier 1 archive still routes through quarantine (never hard-archive).
-            if quarantine:
-                mutator.add_comment(card.id, f"Recovered from {origin}; archiving (obsolete).")
-                mutator.move_card(card.id, quarantine.id)
+            # Tier 1 archive routes through the Agent Archive list (never hard-archive).
+            if archive_list:
+                mutator.add_comment(card.id, _change_comment(
+                    f"Recovered from {origin}; no longer needed, {ARCHIVE_MOVED_WORDING}", v))
+                mutator.move_card(card.id, archive_list.id, position="top")
+                storage.add_archive_entry(db_path, card.id, now_iso)
                 storage.add_recovery(db_path, card.id, origin, "archive", now_iso)
                 result.recoveries.append({"card_id": card.id, "disposition": "archive"})
+                result.recently_archived.append({"card_id": card.id, "name": card.name,
+                                                 "note": ARCHIVE_MOVED_WORDING})
                 executed += 1
             continue
 
@@ -540,7 +709,7 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
         card = board.card_by_id(anchor)
         if card and proposed_id:
             _add_label(mutator, card, proposed_id)
-            mutator.add_comment(anchor, action.get("reason", "Agent proposal — review."))
+            mutator.add_comment(anchor, _proposal_comment(action))
         pid = storage.add_proposal(db_path, now_iso, fp, card_ids, action,
                                    action.get("reason", ""), now_iso)
         result.proposals_opened.append({"proposal_id": pid, "fingerprint": fp, "type": action["type"]})
@@ -573,7 +742,8 @@ def _execute_approved(db_path, mutator, board, action, settings, now_utc, now_is
     if atype == "merge":
         verdict = {"survivor_id": action.get("survivor_id"),
                    "cluster_ids": action.get("card_ids", []),
-                   "new_name": action.get("new_name")}
+                   "new_name": action.get("new_name"), "reason": action.get("reason"),
+                   "confidence": action.get("confidence")}
         execute_merge(db_path, mutator, board, verdict, settings, now_iso, result)
     elif atype == "stale_label_removal":
         card = board.card_by_id(action["card_ids"][0])
@@ -581,22 +751,104 @@ def _execute_approved(db_path, mutator, board, action, settings, now_utc, now_is
         if card and label_id:
             remaining = [lid for lid in card.label_ids if lid != label_id]
             mutator.set_labels(card.id, remaining)
-    elif atype == "recovery_archive":
-        quarantine = board.list_by_name(settings.quarantine_list)
+    elif atype in ("dead_due_clear", "due_redate"):
         card = board.card_by_id(action["card_ids"][0])
-        if card and quarantine:
-            mutator.move_card(card.id, quarantine.id)
+        if card:
+            new_due = action.get("new_due")
+            if atype == "due_redate" and new_due:
+                mutator.add_comment(card.id, f"Old due date was {card.due}; set new due {new_due}.")
+                mutator.set_due(card.id, new_due)
+            else:
+                mutator.add_comment(card.id, f"Old due date was {card.due}; cleared it.")
+                mutator.clear_due(card.id)
+    elif atype == "recovery_archive":
+        archive_list = board.list_by_name(settings.archive_list_name)
+        card = board.card_by_id(action["card_ids"][0])
+        if card and archive_list:
+            mutator.add_comment(card.id, f"Approved; {ARCHIVE_MOVED_WORDING}.")
+            mutator.move_card(card.id, archive_list.id, position="top")
+            storage.add_archive_entry(db_path, card.id, now_iso)
+            result.recently_archived.append({"card_id": card.id, "name": card.name,
+                                             "note": ARCHIVE_MOVED_WORDING})
 
 
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------
 
+REPORT_CARD_PREFIX = "Grooming Report"
+REMINDER_CARD_TITLE = "Review agent spine: update Active Workstreams and People"
+
+
+def _proposal_comment(action: dict) -> str:
+    """Proposal comment: reason (+ Confidence). Approve with 'yes'/'approve'."""
+    line = action.get("reason", "Agent proposal — review.").rstrip(".") + "."
+    conf = action.get("confidence")
+    if conf is not None:
+        line += f" Confidence: {int(conf)}%."
+    line += " Reply 'yes'/'approve' to apply, 'no' or remove the label to reject."
+    return line
+
+
 def _report_card_id(board, settings) -> str | None:
     report_list = board.list_by_name(settings.report_list)
     if not report_list:
         return None
     for c in board.cards_in_list(report_list.id):
-        if c.name.strip().lower().startswith("grooming report"):
+        if c.name.strip().lower().startswith(REPORT_CARD_PREFIX.lower()):
             return c.id
     return None
+
+
+def _protected_card_ids(board, settings) -> set[str]:
+    """Cards exempt from all hygiene/dedup: the Grooming Report + spine reminder."""
+    protected: set[str] = set()
+    rid = _report_card_id(board, settings)
+    if rid:
+        protected.add(rid)
+    for c in board.cards:
+        if not c.closed and c.name.strip() == REMINDER_CARD_TITLE:
+            protected.add(c.id)
+    return protected
+
+
+def maybe_create_spine_reminder(db_path, mutator, board, settings, spine, now_utc, result):
+    """Create the weekly spine-review reminder card at the top of Today.
+
+    On the first run on/after spine_review_day each week (tracked in SQLite),
+    create the reminder unless a card with that title is already open. "off"
+    disables it entirely. Exempt from hygiene/dedup via _protected_card_ids.
+    """
+    if settings.spine_review_day == "off":
+        return
+    _WD = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    local = g.local_now(now_utc, settings.tz_standard_offset, settings.tz_daylight_offset)
+    review_idx = _WD.index(settings.spine_review_day)
+    if local.weekday() < review_idx:
+        return  # before the review day this week
+    iso = local.isocalendar()
+    week_key = f"{iso[0]}-{iso[1]:02d}"
+    if storage.kv_get(db_path, "last_reminder_week") == week_key:
+        return  # already handled this week
+    storage.kv_set(db_path, "last_reminder_week", week_key)
+
+    today_list = board.list_by_name(settings.report_list)
+    if today_list is None:
+        return
+    already_open = any(
+        c.name.strip() == REMINDER_CARD_TITLE
+        for c in board.cards_in_list(today_list.id)
+    )
+    if already_open:
+        result.notes.append("Spine-review reminder already open; not recreating")
+        return
+    url = getattr(spine, "page_url", "") if spine else ""
+    desc = f"Open the Notion spine and update Active Workstreams and People.\nSpine: {url}".rstrip()
+    created = mutator.create_card(today_list.id, REMINDER_CARD_TITLE, desc)
+    cid = created.get("id", "") if isinstance(created, dict) else ""
+    if isinstance(cid, str) and cid and cid not in ("dry-run", "dry-run-archive-list"):
+        from models import Card
+        board.cards.append(Card(id=cid, name=REMINDER_CARD_TITLE, desc=desc,
+                                list_id=today_list.id, list_name=today_list.name))
+    result.reminder_created = True
+    logger.info("Created weekly spine-review reminder card")

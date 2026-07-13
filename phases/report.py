@@ -1,10 +1,10 @@
 """
 Phase 5 — Run report.
 
-Builds the "Grooming Report" (auto-applied actions, open proposals, quarantine
-contents + days remaining, rejections, health stats, Tier-2 approval rates, and
-cap-demoted recoveries) and, in dry-run or first-run, prepends the pre-first-run
-reminder to ARCHIVE-prefix any Scratch list that should be out of recovery scope.
+Builds the "Grooming Report" with the five canonical sections (Still overdue and
+possibly urgent, Awaiting your decision, Recently archived, Done automatically,
+Health stats) and, in dry-run or first-run, prepends the pre-first-run reminder
+to ARCHIVE-prefix any Scratch list that should be out of recovery scope.
 
 The report is always written to a local file; the report card is replaced at the
 top of report_list via the Mutator (a no-op in dry-run — zero board writes).
@@ -29,76 +29,84 @@ _ARCHIVE_REMINDER = (
 
 def build_report(result, board, settings, now_iso, dry_run, first_run,
                  stats=None, approval_rates=None) -> str:
-    """Assemble the Grooming Report text."""
+    """Assemble the Grooming Report text with the five canonical sections."""
     stats = stats or {}
     approval_rates = approval_rates or {}
     lines: list[str] = []
     lines.append(f"{REPORT_CARD_PREFIX} — {now_iso}")
     lines.append(f"Mode: {'DRY-RUN (no board changes)' if dry_run else 'LIVE'}")
+    notion_notes = getattr(result, "notion_notes", []) or []
+    if any("dry_run" in n for n in notion_notes):
+        lines.append("Note: dry_run was set by the Notion 'Rules and thresholds' section.")
     lines.append("")
 
     if dry_run or first_run:
         lines.append(_ARCHIVE_REMINDER)
         lines.append("")
 
-    lines.append("== Auto-applied actions ==")
-    if result.applied:
-        for a in result.applied:
-            lines.append(f"  - {_describe(a, board)}")
+    # 1. Still overdue and possibly urgent -----------------------------------
+    lines.append("== Still overdue and possibly urgent ==")
+    if result.still_overdue:
+        for s in result.still_overdue:
+            reason = f" — {s['reason']}" if s.get("reason") else ""
+            lines.append(f"  - {s['name']} (due {s['due']}){reason}")
     else:
         lines.append("  (none)")
     lines.append("")
 
-    lines.append("== Open proposals (awaiting review) ==")
+    # 2. Awaiting your decision ----------------------------------------------
+    lines.append("== Awaiting your decision ==")
     if result.proposals_opened:
         for p in result.proposals_opened:
             lines.append(f"  - [{p['type']}] proposal #{p['proposal_id']} — reply 'yes'/'approve' or remove the label")
     else:
         lines.append("  (none)")
-    lines.append("")
-
     if result.expired_proposals:
-        lines.append("== Proposals expired (timed out, dropped) ==")
         for p in result.expired_proposals:
-            lines.append(f"  - proposal #{p['proposal_id']} ({p.get('fingerprint','')})")
-        lines.append("")
-
-    lines.append("== Quarantine (Agent: Merged/Removed) ==")
-    if result.quarantine_items:
-        for q in result.quarantine_items:
-            lines.append(f"  - {q['name']} — {q['days_remaining']} day(s) until auto-archive")
-    else:
-        lines.append("  (empty)")
+            lines.append(f"  - expired (timed out, dropped): proposal #{p['proposal_id']} ({p.get('fingerprint','')})")
     lines.append("")
 
-    lines.append("== Rejections detected ==")
-    if result.rejections_recorded:
-        for r in result.rejections_recorded:
-            lines.append(f"  - {r.get('source','?')}: {r.get('fingerprint','')}")
+    # 3. Recently archived ----------------------------------------------------
+    lines.append("== Recently archived ==")
+    lines.append("  (cards moved to the Agent Archive list this run, and cards nearing "
+                 "their 60-day move to Trello's archive (restorable))")
+    if result.recently_archived:
+        for a in result.recently_archived:
+            lines.append(f"  - {a['name']} — {a.get('note', '')}")
     else:
         lines.append("  (none)")
     lines.append("")
 
+    # 4. Done automatically ---------------------------------------------------
+    lines.append("== Done automatically ==")
+    if result.reminder_created:
+        lines.append("  - created the weekly spine-review reminder card")
+    if result.applied:
+        for a in result.applied:
+            lines.append(f"  - {_describe(a, board)}")
+    if not result.applied and not result.reminder_created:
+        lines.append("  (none)")
     if result.demoted_recoveries:
-        lines.append("== Recoveries demoted by Today cap (routed to Next Few Days) ==")
         for d in result.demoted_recoveries:
-            lines.append(f"  - {d['name']}")
-        lines.append("")
+            lines.append(f"  - recovery demoted Today→Next Few Days by cap: {d['name']}")
+    lines.append("")
 
-    lines.append("== Health ==")
-    lines.append(f"  Open duplicate clusters remaining: {stats.get('open_clusters', 'n/a')}")
+    # 5. Health stats ---------------------------------------------------------
+    lines.append("== Health stats ==")
     lines.append(f"  Scratch backlog count: {stats.get('scratch_backlog', 'n/a')}")
     lines.append(f"  Hygiene coverage (in-scope): {stats.get('hygiene_coverage_pct', 'n/a')}%")
     if stats.get("scratch_lists"):
         lines.append(f"  Scratch lists in scope: {', '.join(stats['scratch_lists'])}")
-    lines.append("")
-
-    lines.append("== Tier 2 approval rates (for deciding toggle flips) ==")
-    lines.append(f"  Approved: {approval_rates.get('approved', 0)}  "
-                 f"Rejected: {approval_rates.get('rejected', 0)}  "
-                 f"Approval rate: {approval_rates.get('rate', 'n/a')}")
-    lines.append(f"  tier1_stale_label_removal={settings.tier1_stale_label_removal}  "
-                 f"tier1_recovery_archive={settings.tier1_recovery_archive}")
+    lines.append(f"  Tier-2 approvals: {approval_rates.get('approved', 0)}  "
+                 f"rejections: {approval_rates.get('rejected', 0)}  "
+                 f"rate: {approval_rates.get('rate', 'n/a')}")
+    lines.append(f"  Auto-mode: tier1_stale_label_removal={settings.tier1_stale_label_removal}  "
+                 f"tier1_recovery_archive={settings.tier1_recovery_archive}  "
+                 f"tier1_due_date_clear={settings.tier1_due_date_clear}")
+    if result.rejections_recorded:
+        lines.append(f"  Rejections detected this run: {len(result.rejections_recorded)}")
+    for note in notion_notes:
+        lines.append(f"  {note}")
 
     return "\n".join(lines) + "\n"
 

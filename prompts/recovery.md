@@ -13,8 +13,14 @@ For each card, return one disposition object with:
   - "this_week"      — this week, spine-supported
   - "inbox"          — ambiguous context (default)
   - "merge"          — duplicate of an active card (set "merge_into")
-  - "archive"        — clearly obsolete (e.g. done-workstream logistics)
+  - "archive"        — no longer needed. The "no longer needed" test is: the
+    workstream is marked Done on the spine, OR an event/deadline has passed with
+    nothing left to do, OR the card is titled "[Owner: Name]". Archived cards move
+    to the top of the Agent Archive list — describe as "moved to Trello's archive
+    (restorable)", never deletion.
 - "merge_into": target active card id when disposition is "merge" (else null)
-- "reason": one line
+- "confidence": integer 0–100 — your confidence in this disposition
+- "borderline": true if the user should confirm before archiving/merging
+- "reason": one line (shown to the user verbatim)
 
 Return: {{"dispositions": [ ... ]}}

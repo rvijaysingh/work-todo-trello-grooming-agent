@@ -226,6 +226,24 @@ def hygiene_pass(llm, prompt_loader, system_prefix, hygiene_payload, known_ids,
     return out
 
 
+def classify_due(llm, prompt_loader, system_prefix, due_payload, known_ids,
+                 source_text_by_id, spine_terms, max_tokens=4000):
+    """Dedicated dead-due classification pass (its own LLM call + token budget).
+
+    Returns validated verdicts: {card_id, due_status, new_due?, new_due_source?,
+    confidence, reason, borderline}. `due_status` is required, so every returned
+    item carries an explicit classification; cards the model still omits are
+    escalated downstream (never silently cleared). The larger, per-card-scaled
+    max_tokens keeps a big dead-due set from being truncated (the bug that made
+    the shared hygiene call drop every classification).
+    """
+    prompt = prompt_loader.load("due.md", {"due_json": json.dumps(due_payload)})
+    text = call_llm(llm, prompt, system_prefix, max_tokens=max_tokens)
+    items = extract_items(parse_json(text), "classifications")
+    valid, _ = validate_items(items, known_ids, ["card_id", "due_status"], ["card_id"])
+    return valid
+
+
 def recovery_triage(llm, prompt_loader, system_prefix, recovery_payload, known_ids):
     """Recovery triage. Returns validated verdicts.
 

@@ -434,7 +434,7 @@ def _merge_action_facts(verdict, board, settings, in_scope_ids) -> dict:
 # ---------------------------------------------------------------------------
 
 def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings,
-                    now_utc, now_iso, result, dead_due_ids=None, spine_terms=None):
+                    now_utc, now_iso, result, dead_due_ids=None, spine_terms=None, skip_ids=None):
     """Execute renames (Tier 1) and dead-due handling; return Tier-2 due actions.
 
     Renames respect max_renames_per_run with heuristic-flagged names prioritized;
@@ -448,12 +448,13 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
     open_proposed = {c.id for c in board.cards if c.has_label(settings.label_proposed)}
     protected = _protected_card_ids(board, settings)
     auto_id = board.label_id(settings.label_auto_updated)
-    dead_due_ids = dead_due_ids or set()
+    dead_due_ids = set(dead_due_ids or set())
     spine_terms = spine_terms or []
+    skip_ids = skip_ids or set()  # cards claimed by a higher-precedence action (merge/archive)
 
     def touchable(card_id):
         card = board.card_by_id(card_id)
-        return card is not None and not g.is_never_touch(
+        return card is not None and card_id not in skip_ids and not g.is_never_touch(
             card, now_utc, settings, in_scope, open_proposed, protected)
 
     # -- Renames (Tier 1) ---------------------------------------------------
@@ -487,6 +488,9 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         # Only entries carrying an explicit due decision act here — a rename
         # verdict for a dead-due card must NOT trigger a clear.
         if not v.get("clear_due") and not v.get("due_status"):
+            continue
+        if cid in skip_ids:  # merged/archived → no date fix (precedence)
+            handled_due.add(cid)
             continue
         card = board.card_by_id(cid)
         if card is None or not card.due:
@@ -528,16 +532,17 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
                 f"Old due date was {card.due}; cleared it (long past, nothing left to do)", v))
             mutator.clear_due(cid)
             atype = "dead_due_clear"
-        _add_label(mutator, card, auto_id)
+        # Date fixes are label-neutral by design: they never add or remove labels
+        # (only the old date is noted in a comment).
         if not mutator.dry_run:
             storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
                                   {"original_due": card.due, "new_due": new_due if redate else None}, "success")
         result.applied.append({"type": atype, "card_id": cid, "new_due": new_due if redate else None})
 
     # Safety net: any overdue in-scope card the LLM did not classify is escalated,
-    # not silently dropped.
+    # not silently dropped (but a card claimed by merge/archive is not escalated).
     for cid in dead_due_ids:
-        if cid in handled_due:
+        if cid in handled_due or cid in skip_ids:
             continue
         card = board.card_by_id(cid)
         if card is None or not card.due:
@@ -562,30 +567,75 @@ def _change_comment(summary: str, verdict: dict) -> str:
     return line
 
 
-def execute_stale_labels(db_path, mutator, board, stale_pairs, settings, now_utc, now_iso, result):
-    """Auto-remove stale time-based labels (Tier 1) or return them as Tier-2 actions.
+def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdicts, settings,
+                               now_utc, now_iso, result, skip_ids=None):
+    """Three-way disposition for stale time-based labels (design §5.1):
 
-    stale_pairs: list of (card, label_name). These are detected deterministically,
-    so they carry confidence 100 (never borderline). Governed by
-    tier1_stale_label_removal.
+      (a) card is no longer needed → archived by the in-scope archive pass (it is
+          in skip_ids here, so we do nothing);
+      (b) workstream Active AND Time-sensitive → SWAP the label to the matching
+          tier (2. Next Few Days / 3. This Week) instead of removing;
+      (c) otherwise REMOVE the label.
+
+    The old label is always noted in a comment. Governed by
+    tier1_stale_label_removal + auto_min_confidence (borderline → proposal).
     """
     in_scope = _in_scope_ids(board, settings)
     open_proposed = {c.id for c in board.cards if c.has_label(settings.label_proposed)}
     protected = _protected_card_ids(board, settings)
     auto_id = board.label_id(settings.label_auto_updated)
+    skip_ids = skip_ids or set()
+    verdict_by_id = {v["card_id"]: v for v in (label_verdicts or [])}
     tier2 = []
+
     for card, label in stale_pairs:
-        lid = board.label_id(label)
-        action = {"type": "stale_label_removal", "card_ids": [card.id], "label_id": lid,
-                  "anchor_card_id": card.id, "confidence": 100,
-                  "reason": f"Time-based label '{label}' is stale (card not in the matching "
-                            f"list, applied long ago)."}
+        if card.id in skip_ids:  # merged/archived → precedence, no label change
+            continue
+        old_lid = board.label_id(label)
+        v = verdict_by_id.get(card.id, {})
+        disp = v.get("disposition", "remove")
+        target = v.get("target_label")
+        target_lid = board.label_id(target) if target else None
+
+        if disp == "swap" and target_lid:
+            action = {"type": "label_swap", "card_ids": [card.id], "anchor_card_id": card.id,
+                      "label_id": old_lid, "target_label": target,
+                      "confidence": v.get("confidence"), "borderline": v.get("borderline"),
+                      "reason": v.get("reason",
+                                      f"Workstream active & time-sensitive; move '{label}' to '{target}'.")}
+            if assign_tier(action, settings) == g.TIER2:
+                tier2.append(action)
+                continue
+            if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected):
+                continue
+            new_labels = [x for x in card.label_ids if x != old_lid]
+            if target_lid not in new_labels:
+                new_labels.append(target_lid)
+            if auto_id and auto_id not in new_labels:
+                new_labels.append(auto_id)
+            mutator.set_labels(card.id, new_labels)
+            mutator.add_comment(card.id, _change_comment(
+                f"Swapped stale label '{label}' to '{target}'", action))
+            if not mutator.dry_run:
+                storage.record_action(db_path, now_iso, now_iso, g.TIER1, "label_swap",
+                                      [card.id], {"old": label, "new": target}, "success")
+            result.applied.append({"type": "label_swap", "card_id": card.id,
+                                   "label": label, "target_label": target})
+            continue
+
+        # (c) Remove.
+        action = {"type": "stale_label_removal", "card_ids": [card.id], "label_id": old_lid,
+                  "anchor_card_id": card.id, "confidence": v.get("confidence", 100),
+                  "borderline": v.get("borderline"),
+                  "reason": v.get("reason",
+                                  f"Time-based label '{label}' is stale (card not in the matching "
+                                  f"list, applied long ago).")}
         if assign_tier(action, settings) == g.TIER2:
             tier2.append(action)
             continue
-        if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected) or not lid:
+        if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected) or not old_lid:
             continue
-        remaining = [x for x in card.label_ids if x != lid]
+        remaining = [x for x in card.label_ids if x != old_lid]
         if auto_id and auto_id not in remaining:
             remaining.append(auto_id)
         mutator.set_labels(card.id, remaining)
@@ -595,6 +645,74 @@ def execute_stale_labels(db_path, mutator, board, stale_pairs, settings, now_utc
                                   [card.id], {"label": label}, "success")
         result.applied.append({"type": "stale_label_removal", "card_id": card.id, "label": label})
     return tier2
+
+
+# ---------------------------------------------------------------------------
+# Archive helpers (shared by merge losers, recovery archive, in-scope archive)
+# ---------------------------------------------------------------------------
+
+def _archive_card(db_path, mutator, board, card, settings, now_iso, result, comment) -> bool:
+    """Move a card to the TOP of the Agent Archive list with a comment + ledger entry."""
+    archive_list = board.list_by_name(settings.archive_list_name)
+    if archive_list is None:
+        result.notes.append("Agent Archive list missing; archive skipped")
+        return False
+    mutator.add_comment(card.id, comment)
+    mutator.move_card(card.id, archive_list.id, position="top")
+    if not mutator.dry_run:
+        storage.add_archive_entry(db_path, card.id, now_iso)
+    result.recently_archived.append({"card_id": card.id, "name": card.name, "url": card.url,
+                                     "note": archive_list_wording(settings)})
+    return True
+
+
+def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
+                            now_utc, now_iso, result, skip_ids=None):
+    """Archive in-scope cards that meet the 'no longer needed' test (design §4/§5.2).
+
+    Governed by tier1_recovery_archive + auto_min_confidence; capped at
+    max_inscope_archives_per_run. Returns (tier2_actions, archived_ids). skip_ids
+    are cards already claimed by a merge (precedence merge > archive).
+    """
+    skip_ids = skip_ids or set()
+    in_scope = _in_scope_ids(board, settings)
+    open_proposed = {c.id for c in board.cards if c.has_label(settings.label_proposed)}
+    protected = _protected_card_ids(board, settings)
+    executed = 0
+    tier2 = []
+    archived_ids: set[str] = set()
+
+    for v in archive_verdicts:
+        cid = v["card_id"]
+        if cid in skip_ids:
+            continue
+        card = board.card_by_id(cid)
+        if card is None or card.list_id not in in_scope:
+            continue
+        action = {"type": "inscope_archive", "card_ids": [cid], "anchor_card_id": cid,
+                  "confidence": v.get("confidence"), "borderline": v.get("borderline"),
+                  "reason": v.get("reason", "No longer needed.")}
+        if assign_tier(action, settings) == g.TIER2:
+            tier2.append(action)
+            continue
+        if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected):
+            continue
+        if executed >= settings.max_inscope_archives_per_run:
+            result.notes.append(f"In-scope archive deferred by cap: {cid}")
+            continue
+        ok = _archive_card(db_path, mutator, board, card, settings, now_iso, result,
+                           _change_comment(f"No longer needed; {archive_list_wording(settings)}", v))
+        if not ok:
+            continue
+        if not mutator.dry_run:
+            storage.record_action(db_path, now_iso, now_iso, g.TIER1, "inscope_archive",
+                                  [cid], {"reason": v.get("reason")}, "success")
+        result.applied.append({"type": "inscope_archive", "card_id": cid, "reason": v.get("reason")})
+        archived_ids.add(cid)
+        executed += 1
+
+    result.counters["inscope_archives"] = executed
+    return tier2, archived_ids
 
 
 def _apply_rename(mutator, board, card, new_name, new_desc, auto_id, settings):
@@ -783,7 +901,9 @@ def _proposed_action_desc(action: dict, board) -> str:
         return f"merge duplicates into {tgt}"
     if atype == "stale_label_removal":
         return "remove a stale time-based label"
-    if atype == "recovery_archive":
+    if atype == "label_swap":
+        return "swap the stale 'must do' label to the matching tier"
+    if atype in ("recovery_archive", "inscope_archive"):
         return "move to the Agent Archive list (no longer needed)"
     if atype in ("dead_due_clear", "due_redate"):
         return "clear or re-date a long-overdue due date"
@@ -837,16 +957,20 @@ def _execute_approved(db_path, mutator, board, action, settings, now_utc, now_is
             else:
                 mutator.add_comment(card.id, f"Old due date was {card.due}; cleared it.")
                 mutator.clear_due(card.id)
-    elif atype == "recovery_archive":
-        archive_list = board.list_by_name(settings.archive_list_name)
+    elif atype in ("recovery_archive", "inscope_archive"):
         card = board.card_by_id(action["card_ids"][0])
-        if card and archive_list:
-            mutator.add_comment(card.id, f"Approved; {archive_list_wording(settings)}.")
-            mutator.move_card(card.id, archive_list.id, position="top")
-            if not mutator.dry_run:
-                storage.add_archive_entry(db_path, card.id, now_iso)
-            result.recently_archived.append({"card_id": card.id, "name": card.name,
-                                             "url": card.url, "note": archive_list_wording(settings)})
+        if card:
+            _archive_card(db_path, mutator, board, card, settings, now_iso, result,
+                          f"Approved; {archive_list_wording(settings)}.")
+    elif atype == "label_swap":
+        card = board.card_by_id(action["card_ids"][0])
+        target_lid = board.label_id(action.get("target_label")) if action.get("target_label") else None
+        old_lid = action.get("label_id")
+        if card and target_lid:
+            new_labels = [x for x in card.label_ids if x != old_lid]
+            if target_lid not in new_labels:
+                new_labels.append(target_lid)
+            mutator.set_labels(card.id, new_labels)
 
 
 # ---------------------------------------------------------------------------

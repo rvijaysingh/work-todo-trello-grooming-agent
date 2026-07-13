@@ -173,18 +173,39 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     hygiene_verdicts = judgments.get("hygiene", [])
     recovery_verdicts = judgments.get("recovery", [])
 
-    # Phase 4 — execute
+    # Phase 4 — execute (precedence: merge > archive > date/label/title fixes)
     flagged_ids = {c.id for c in hyg["flagged_renames"]}
     dead_due_ids = {c.id for c in hyg["dead_dues"]}
     spine_terms = spine.all_terms() if spine else []
+    inscope_archive_verdicts = judgments.get("inscope_archive", [])
+    label_verdicts = judgments.get("labels", [])
+
+    # Cards in any duplicate cluster are "being merged" — they get no other fix.
+    merge_claimed = set()
+    for v in cluster_verdicts:
+        if v.get("relation") == "duplicate":
+            merge_claimed.update(v.get("cluster_ids", []))
+
     tier2_merges = ex.execute_merges(db_path, mutator, board, cluster_verdicts, settings, now_utc, now_iso, result)
+
+    # In-scope archiving (item 2). Any card with an archive decision (executed or
+    # proposed) is claimed → no date/label/title fix this run.
+    tier2_inscope, archived_ids = ex.execute_inscope_archive(
+        db_path, mutator, board, inscope_archive_verdicts, settings, now_utc, now_iso, result,
+        skip_ids=merge_claimed)
+    archive_claimed = {v["card_id"] for v in inscope_archive_verdicts} | archived_ids
+    claimed = merge_claimed | archive_claimed
+
     tier2_due = ex.execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings,
-                                   now_utc, now_iso, result, dead_due_ids=dead_due_ids, spine_terms=spine_terms)
-    tier2_stale = ex.execute_stale_labels(db_path, mutator, board, hyg["stale_labels"], settings,
-                                          now_utc, now_iso, result)
+                                   now_utc, now_iso, result, dead_due_ids=dead_due_ids,
+                                   spine_terms=spine_terms, skip_ids=claimed)
+    tier2_labels = ex.execute_label_dispositions(db_path, mutator, board, hyg["stale_labels"],
+                                                 label_verdicts, settings, now_utc, now_iso, result,
+                                                 skip_ids=claimed)
     tier2_archives = ex.execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_iso, result)
 
-    tier2_actions = _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tier2_stale)
+    tier2_actions = _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due,
+                                   tier2_labels, tier2_inscope)
     ex.generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso, result)
 
     # Phase 5 — report
@@ -207,7 +228,7 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
 def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity_keywords, hyg, rec_batch, settings):
     """Call the three LLM passes. Safe no-op structure if llm is None."""
     if llm is None or prompts is None:
-        return {"clusters": [], "hygiene": [], "recovery": []}
+        return {"clusters": [], "hygiene": [], "inscope_archive": [], "labels": [], "recovery": []}
     known_ids = board.all_card_ids()
     src_text = {c.id: f"{c.name}\n{c.desc}" for c in board.cards}
     spine_terms = spine.all_terms() if spine else []
@@ -238,11 +259,50 @@ def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity
         hygiene = hygiene + judge.classify_due(
             llm, prompts, prefix, due_payload, known_ids, src_text, spine_terms,
             max_tokens=due_budget)
+
+    # In-scope "no longer needed" archive candidates: deterministic [Owner: X]
+    # titles (confidence 100) plus the LLM's Done-workstream / passed-deadline
+    # judgments. Deterministic entries win on dedup.
+    inscope_cards = hyg["all_in_scope"]
+    inscope_payload = {"cards": [{"id": c.id, "name": c.name, "list": c.list_name}
+                                 for c in inscope_cards]}
+    ia_budget = min(8000, max(3000, 60 * len(inscope_cards)))
+    llm_archives = judge.classify_inscope_archive(llm, prompts, prefix, inscope_payload, known_ids,
+                                                  max_tokens=ia_budget)
+    inscope_archive = _merge_owner_archives(inscope_cards, llm_archives)
+
+    # Stale-label disposition (swap vs remove); archive handled above.
+    stale_cards = hyg["stale_labels"]
+    labels_payload = {"cards": [{"id": c.id, "name": c.name, "stale_label": label,
+                                 "list": c.list_name} for c, label in stale_cards]}
+    label_verdicts = judge.classify_labels(llm, prompts, prefix, labels_payload, known_ids) \
+        if stale_cards else []
+
     return {
         "clusters": judge.adjudicate_clusters(llm, prompts, prefix, clusters_payload, known_ids, src_text, spine_terms),
         "hygiene": hygiene,
+        "inscope_archive": inscope_archive,
+        "labels": label_verdicts,
         "recovery": recovery,
     }
+
+
+def _merge_owner_archives(inscope_cards, llm_archives):
+    """Combine deterministic [Owner: X] archive candidates with LLM verdicts.
+
+    Every in-scope card whose title is '[Owner: Name] ...' is a certain archive
+    candidate (confidence 100). LLM verdicts add Done-workstream / passed-deadline
+    cards. Deterministic entries take precedence on dedup by card id."""
+    import guardrails as g
+
+    out = {}
+    for v in llm_archives:
+        out[v["card_id"]] = v
+    for c in inscope_cards:
+        if g.is_owner_titled(c.name):
+            out[c.id] = {"card_id": c.id, "confidence": 100, "borderline": False,
+                         "reason": "Titled '[Owner: …]' — a delegated/handed-off item."}
+    return list(out.values())
 
 
 def _default_recovery(recovery_verdicts, rec_batch):
@@ -258,11 +318,12 @@ def _default_recovery(recovery_verdicts, rec_batch):
     return out
 
 
-def _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tier2_stale):
+def _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tier2_labels,
+                   tier2_inscope):
     """Assemble Tier-2 action dicts to become Agent: Proposed cards.
 
-    tier2_due and tier2_stale are already full action dicts (with confidence and
-    reason); merges and recovery archives are converted from verdicts here.
+    tier2_due / tier2_labels / tier2_inscope are already full action dicts (with
+    confidence and reason); merges and recovery archives are converted here.
     """
     actions = []
     for v in tier2_merges:
@@ -273,8 +334,9 @@ def _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tie
             "confidence": v.get("confidence"),
             "reason": v.get("reason", "Likely duplicate — recommend merging (review)."),
         })
+    actions.extend(tier2_inscope)
     actions.extend(tier2_due)
-    actions.extend(tier2_stale)
+    actions.extend(tier2_labels)
     for v in tier2_archives:
         actions.append({
             "type": "recovery_archive", "card_ids": [v["card_id"]], "anchor_card_id": v["card_id"],

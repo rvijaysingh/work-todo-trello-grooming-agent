@@ -143,10 +143,10 @@ def _verbs(dry_run: bool) -> dict:
     if dry_run:
         return {"create": "would create", "move": "would move", "remove": "would remove",
                 "rename": "would rename", "clear": "would clear/re-date", "merge": "would merge",
-                "archive": "would move to Trello's archive"}
+                "archive": "would move to Trello's archive", "swap": "would swap"}
     return {"create": "created", "move": "moved", "remove": "removed",
             "rename": "renamed", "clear": "cleared/re-dated", "merge": "merged",
-            "archive": "moved to Trello's archive"}
+            "archive": "moved to Trello's archive", "swap": "swapped"}
 
 
 def _describe(action: dict, board, verb: dict) -> str:
@@ -154,13 +154,19 @@ def _describe(action: dict, board, verb: dict) -> str:
     cid = action.get("card_id") or action.get("survivor_id", "")
     ref = _card_ref(board, cid)
     if t == "merge":
-        n = len(action.get("loser_ids", []))
-        return f"{verb['merge']} {n} duplicate(s) into survivor {ref}"
+        losers = action.get("loser_ids", [])
+        head = f"{verb['merge']} {len(losers)} duplicate(s) into survivor {_card_ref(board, action.get('survivor_id'))}"
+        subs = [f"      merged away: {_card_ref(board, lid)}" for lid in losers]
+        return "\n".join([head] + subs)
     if t == "rename":
         return f"{verb['rename']} {ref} → '{action.get('new_name')}'"
     if t == "stale_label_removal":
         lbl = action.get("label", "a stale label")
         return f"{verb['remove']} label '{lbl}' from {ref}"
+    if t == "label_swap":
+        return f"{verb['swap']} label '{action.get('label')}' → '{action.get('target_label')}' on {ref}"
+    if t == "inscope_archive":
+        return f"{verb['move']} {ref} to the Agent Archive list (no longer needed)"
     if t == "dead_due_clear":
         return f"{verb['clear']} the long-overdue due date on {ref}"
     if t == "due_redate":

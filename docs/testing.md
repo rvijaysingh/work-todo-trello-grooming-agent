@@ -60,7 +60,7 @@ edge cases preserved). Required shape:
     { "id": "...", "name": "Inbox / Triage", ... },
     { "id": "...", "name": "Next Few Days", ... },
     { "id": "...", "name": "This Week", ... },
-    { "id": "...", "name": "Agent: Merged/Removed", ... },      // quarantine
+    { "id": "...", "name": "Agent Archive", ... },             // single archive list (auto-created)
     { "id": "...", "name": "Scratch 6-24", ... },
     { "id": "...", "name": "Scratch 6-3", ... },
     { "id": "...", "name": "ARCHIVE Scratch 5-12", ... },       // excluded by rename
@@ -124,11 +124,13 @@ these conditions (so tests can select cards by intent, not by hardcoded id):
 | Card with an open `Agent: Proposed` label | never-touch |
 | `Agent: Proposed` card with a "yes"/"approve" comment | approval parsing |
 | `Agent: Proposed` card with a "no" comment / label removed | rejection parsing |
-| `Agent: Proposed` card older than `proposal_timeout_days` | proposal timeout |
+| `Agent: Proposed` card older than `proposal_timeout_days` (14) | proposal timeout |
 | `Agent: Auto-Updated` card Vijay has since edited | implicit rejection |
-| `Agent: Auto-Updated` label older than 7 days, untouched | label expiry |
-| Quarantined card untouched ≥ 7 days | auto-archive |
-| Quarantined card dragged back to a list | quarantine pull-back rejection |
+| `Agent: Auto-Updated` label older than `optimistic_label_days`, untouched | label expiry |
+| Card in the `Agent Archive` list with a SQLite entry ts older than `archive_list_days` (60) | Trello (restorable) archive |
+| `Agent Archive` card dragged back to a list | archive pull-back rejection |
+| Card overdue > 14 days whose workstream is Active | still-matters → never touched, surfaced |
+| Card overdue > 14 days with a re-date written in its text / spine | re-date from written source only |
 | Scratch cards spanning newest→oldest lists for recovery ordering | recovery batch |
 | ≥ 4 recovery cards judged Today-worthy | `recovery_today_max` cap → NFD demotion |
 
@@ -207,11 +209,13 @@ Each row: LLM proposes an action; Python applies the deterministic floor/ceiling
 | `test_tier_merge_survivor_outside_edit_scope_forced_tier2` | Survivor lives outside edit scope | Tier 2 |
 | `test_tier_merge_loser_has_attachment_forced_tier2` | Losing card has an attachment | Tier 2 |
 | `test_tier_merge_loser_has_checklist_forced_tier2` | Losing card has a checklist | Tier 2 |
-| `test_tier_recovery_archive_default_tier2` | Recovery archive proposal, `tier1_recovery_archive` = false | Tier 2 |
-| `test_tier_recovery_archive_tier1_when_flag_set` | Recovery archive proposal, `tier1_recovery_archive` = true | Tier 1 |
-| `test_tier_stale_label_removal_default_tier2` | Stale label removal, `tier1_stale_label_removal` = false | Tier 2 |
-| `test_tier_stale_label_removal_tier1_when_flag_set` | Stale label removal, `tier1_stale_label_removal` = true | Tier 1 |
-| `test_tier_card_edited_within_12h_never_touched` | Card edited by Vijay < `no_touch_hours` | No action at all (neither tier) |
+| `test_tier_recovery_archive_default_tier1_auto_mode` | Recovery archive, `tier1_recovery_archive` = true (shipped) + confident | Tier 1 |
+| `test_tier_recovery_archive_tier2_when_flag_off` | Recovery archive, flag false | Tier 2 |
+| `test_tier_recovery_archive_borderline_to_tier2` | Flag on but low confidence / borderline | Tier 2 |
+| `test_tier_stale_label_removal_default_tier1_auto_mode` | Stale label removal, flag true (shipped) | Tier 1 |
+| `test_tier_due_clear_default_tier1_auto_mode` / `_tier2_when_flag_off` / `_borderline_to_tier2` | `tier1_due_date_clear` gate + borderline | Tier 1 / Tier 2 |
+| `test_is_borderline_below_auto_min_confidence` | Confidence below `auto_min_confidence` | borderline → Tier 2 |
+| `test_tier_card_edited_within_no_touch_never_touched` / `test_no_touch_zero_recent_edit_is_touchable` | `no_touch_hours` = 12 vs 0 | no-touch honored / disabled |
 | `test_tier_llm_high_confidence_cannot_override_forced_tier2` | LLM says Tier 1 but a forced-Tier-2 condition holds | Python floor wins → Tier 2 |
 
 ### 5. Guardrails (§6, enforced in Python)
@@ -245,17 +249,32 @@ Each row: LLM proposes an action; Python applies the deterministic floor/ceiling
 | `test_name_clean_title_not_flagged` | Well-formed mixed-case title | Not flagged | negative assert |
 | `test_name_llm_nominated_rename_beyond_flagged_allowed` | Clean name the LLM still nominates to rename | Rename permitted (filter is not a gate) | positive assert |
 
-### 7. Quarantine lifecycle (§3, §4, §5.3)
+### 7. Single Agent Archive list lifecycle (§3, §4, §5.3) — `test_archive.py`
 
 | Test | Scenario | Expected result | Validation |
 |---|---|---|---|
-| `test_merge_moves_loser_to_quarantine_not_archive` | Executed merge | Loser moved to `Agent: Merged/Removed` with a comment linking survivor; **not** archived | move-call + comment-call assert |
-| `test_auto_updated_label_expires_after_quarantine_days` | Label untouched > 7 days | Label stripped | remove-label call assert |
-| `test_auto_updated_label_within_window_kept` | Label 6 days old | Label retained | negative assert |
-| `test_quarantined_card_auto_archives_after_7_days` | Quarantined, untouched ≥ 7 days | Card archived (only path to archive is via quarantine) | archive-call assert |
-| `test_quarantined_card_within_window_not_archived` | Quarantined 6 days | Not archived | negative assert |
-| `test_quarantine_pullback_cancels_archive` | Card pulled back before 7 days | Not archived; rejection recorded (ties to §1) | negative archive assert + DB assert |
+| `test_archive_list_auto_created_when_absent` | Archive list missing | Created (positioned last) via `create_list`; added to board | create_list call + position assert |
+| `test_archive_list_not_recreated_when_present` | Archive list present | No create | negative assert |
+| `test_archive_list_excluded_from_recovery_scope` / `_edit_scope` | Scope resolution | Archive list excluded from recovery + edit scopes | set-membership negative assert |
+| `test_merge_moves_loser_to_archive_list_not_trello_archive` | Executed merge | Loser moved to TOP of `Agent Archive`, entry ts in SQLite, comment links survivor; **not** Trello-archived | move-call (pos=top) + ledger + comment assert |
+| `test_archive_card_trello_archived_after_archive_list_days` | Ledger ts > 60 days | Card Trello-archived; ledger cleared | archive-call + DB assert |
+| `test_archive_card_within_window_not_archived` | Ledger ts 3 days | Not archived | negative assert |
+| `test_archive_card_approaching_date_surfaced` | Ledger ts ~55 days | Appears under "Recently archived" | result assert |
+| `test_archive_expiry_falls_back_to_last_activity_without_ledger` | No ledger row | Falls back to `dateLastActivity` | archive-call assert |
+| `test_archive_pullback_not_archived` | Card dragged back to a list | Not Trello-archived | negative assert |
+| `test_auto_updated_label_expires_after_window` / `_within_window_kept` | Label age vs `optimistic_label_days` | Stripped / retained | assert |
+| `test_approved_archive_routes_through_archive_list` | Approved archive proposal | Moves to top of `Agent Archive` + ledger | move + ledger assert |
 | `test_nothing_hard_deleted_ever` | Any lifecycle path | No delete call is ever issued | global negative assert on delete |
+
+### 7b. Automatic mode, due handling, Notion rules, reminder (new)
+
+| Area | Tests | Coverage |
+|---|---|---|
+| Auto-mode execution + comment format | `test_execute.py::test_rename_carries_change_comment_with_confidence`, `test_stale_label_auto_removed_tier1`, `test_stale_label_proposed_when_flag_off` | Tier-1 auto actions add a `reason … Confidence: NN%` comment; flag-off → proposed |
+| Due classification | `test_due.py` | still-matters never touched + surfaced; no-longer-matters cleared auto with comment; re-date only from written source (else clear); borderline / flag-off → proposal |
+| Notion "Rules and thresholds" | `test_notion_rules.py` | block parsing; valid override applies + notes; invalid ignored + noted; unknown key noted; validation-rejected reverted; `dry_run` from Notion; missing section / unreachable spine fall back silently |
+| Weekly spine reminder | `test_reminder.py` | created on/after `spine_review_day`; skipped if already open; `"off"` disables; before-day skip; once per week; reminder card protected from hygiene |
+| Report sections | `test_e2e.py::test_e2e_run_report_generated` | the five canonical section names appear in order |
 
 ### 8. Recovery scope resolution (§5.2)
 
@@ -276,7 +295,8 @@ Each row: LLM proposes an action; Python applies the deterministic floor/ceiling
 | `test_recovery_today_cap_demotes_overflow_to_nfd` | 4 spine-supported-to-Today cards, `recovery_today_max`=3 | 3 routed to Today; the 4th routed to `Next Few Days`; Grooming Report notes it was demoted by the cap | Today-move count == 3; NFD-move assert; report content assert |
 | `test_recovery_route_to_inbox_when_ambiguous` | Ambiguous context | Card routed to `Inbox / Triage` (default) | move assert |
 | `test_recovery_merge_into_active_card` | Clusters with an active card | Merge disposition (flows through merge path/invariant) | merge-call assert |
-| `test_recovery_propose_archive_default_tier2` | Clearly obsolete (Done workstream), `tier1_recovery_archive`=false | `propose-archive`, Tier 2 | tier assert |
+| `test_recovery_archive_auto_when_confident` | No longer needed (Done workstream), auto-mode default + confident | Moved to top of `Agent Archive`, ledger + "restorable" comment | move + ledger assert |
+| `test_recovery_archive_borderline_proposed` / `_proposed_when_flag_off` | Low confidence, or flag off | `propose-archive`, Tier 2 | tier2 assert |
 | `test_recovery_routed_card_gets_origin_comment` | Any routed card | Comment noting origin list added | comment-text assert |
 | `test_recovery_respects_max_recoveries_cap` | > cap dispositioned to route | Executed routings ≤ `max_recoveries_per_run` | count assert |
 
@@ -317,7 +337,7 @@ Each row: LLM proposes an action; Python applies the deterministic floor/ceiling
 | `test_e2e_dedup_merge_pipeline` | Two exact duplicates in edit scope → merge | Survivor updated (name+consolidated desc), loser quarantined w/ link, `Agent: Auto-Updated` applied, invariant satisfied, report lists the action |
 | `test_e2e_hygiene_pipeline` | Overdue-14d + pipe-in-name card | Due cleared (original in comment), name cleaned with `Original title:` preserved, Tier 1 label applied |
 | `test_e2e_recovery_pipeline` | Newest scratch batch triaged | Cards routed per disposition, origin comments added, ledger updated, Today cap respected with NFD demotion noted |
-| `test_e2e_run_report_generated` | Full run | Single "Grooming Report" card at top of `report_list` summarizing auto-applied actions, open proposals, quarantine + days remaining, rejections, health stats, Tier 2 approval rates (input for flipping the tiering toggles), and cap-demoted recoveries |
+| `test_e2e_run_report_generated` | Full run | Single "Grooming Report" card at top of `report_list` with the five canonical sections in order (Still overdue / Awaiting your decision / Recently archived / Done automatically / Health stats) |
 | `test_e2e_three_failures_autopause` | Three consecutive failed runs | Agent auto-pauses (`auto_pause_after_failures`); alert sent via mocked Gmail SMTP |
 
 ---

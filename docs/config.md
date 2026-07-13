@@ -14,16 +14,39 @@ design implies elsewhere and the resolved design decisions recorded below.
 
 | File | Location | Committed? | Holds |
 |---|---|---|---|
-| `agent_config.json` | repo root | yes | All behavioral parameters (this schema) |
+| `agent_config.json` | repo root | yes | All behavioral parameters (this schema) — the on-disk source of truth |
 | `.env.json` | `C:\Users\VJ\VS Code Projects\config\.env.json` | **no** (gitignored, machine-local) | All credentials/secrets |
 | `agent_config.example.json` | repo root | yes | Full example with defaults (mirrors the example below) |
-| Notion spine | Notion page `spine_page_id` | n/a | World state (workstreams/people/notes), not settings |
+| Notion spine — **Rules and thresholds** section | Notion page `spine_page_id` | n/a | **Live overrides** for behavioral params, read each run (see precedence below) |
+| Notion spine — other sections | Notion page `spine_page_id` | n/a | World state (workstreams/people/notes/naming standard), not settings |
 
 Rules (from CLAUDE.md): secrets live **only** in `.env.json`; behavioral params
-live **only** in `agent_config.json`; no thresholds, list names, label names, or
-caps are hardcoded anywhere in code. All configuration is validated at startup —
-fail fast with a clear message naming the missing/invalid field. The shared
-library receives every value as a parameter and owns no config files.
+live **only** in `agent_config.json` (the authoritative on-disk file) with the
+spine **Rules and thresholds** section as a live per-run override; no thresholds,
+list names, label names, or caps are hardcoded anywhere in code. All configuration
+is validated at startup — fail fast with a clear message naming the
+missing/invalid field. The shared library receives every value as a parameter and
+owns no config files.
+
+### Config precedence
+
+For every run the effective value of a behavioral parameter is resolved as:
+
+1. `agent_config.json` on disk (authoritative default).
+2. Overridden by a matching key in the spine **Rules and thresholds** section
+   **iff** the value is valid and passes full settings validation.
+
+`--dry-run` on the CLI and a `dry_run: true` in the spine Rules section both force
+dry-run on top of the file value (any of the three being true → dry-run). When the
+Notion section sets `dry_run`, the Grooming Report states the value came from
+Notion. Invalid values and unknown keys in the Rules section are ignored with a
+note in the report; a missing section, an empty section, or an unreachable spine
+falls back silently to the file. Because the Rules section is live config, any
+change to a behavioral default must update **both** `agent_config.json` and that
+Notion section (see CLAUDE.md). Recognized keys and coercion live in
+`spine.py::_OVERRIDE_TYPES` and cover every behavioral parameter below (the three
+`tier1_*` flags, `dry_run`, `recovery_batch_size`, `archive_list_days`,
+`proposal_timeout_days`, `spine_review_day`, caps, thresholds, and windows).
 
 ---
 
@@ -46,8 +69,8 @@ enforced at startup unless noted.
 
 | Parameter | Type | Default | Allowed / validation | Description |
 |---|---|---|---|---|
-| `quarantine_list` | string | `"Agent: Merged/Removed"` | must resolve to an existing list (created in Step 0 setup) | List where losing/merged cards are parked (never hard-deleted, never archived without passing through here). |
-| `report_list` | string | `"Today"` | must resolve to an existing list; should be in edit scope | List where the pinned "Grooming Report" card is placed/replaced each run. |
+| `archive_list_name` | string | `"Agent Archive"` | non-empty; **auto-created** at startup (positioned last on the board) if absent — never required to pre-exist | The single list where merged-away duplicates, approved archive proposals, and recovery-archived cards move (to the TOP). Excluded from edit, dedup-comparison, and recovery scopes. Cards here longer than `archive_list_days` are archived via Trello's built-in (restorable) archive. Nothing is ever hard-deleted; nothing reaches Trello's archive without passing through here. |
+| `report_list` | string | `"Today"` | must resolve to an existing list; should be in edit scope | List where the pinned "Grooming Report" card and the weekly spine-review reminder card are placed at the top. |
 | `labels.auto_updated` | string | `"Agent: Auto-Updated"` | must resolve to an existing board label | Label applied to Tier 1 auto-executed actions. |
 | `labels.proposed` | string | `"Agent: Proposed"` | must resolve to an existing board label | Label applied to Tier 2 flag-only proposals. |
 
@@ -55,18 +78,18 @@ enforced at startup unless noted.
 
 | Parameter | Type | Default | Allowed / validation | Description |
 |---|---|---|---|---|
-| `recovery_batch_size` | int | `15` | `> 0` | Number of unprocessed scratch/archive cards triaged per run, newest source list first. |
-| `recovery_today_max` | int | `3` | `>= 0`; `<= recovery_batch_size` | Max cards routed **directly to Today** per run. Cards judged Today-worthy beyond this cap route to `Next Few Days` instead, and the Grooming Report notes they were demoted by the cap. |
+| `recovery_batch_size` | int | `2` | `> 0` | Number of unprocessed scratch cards triaged per run, newest source list first. Deliberately small — a steady, low-risk drain. |
+| `recovery_today_max` | int | `3` | `>= 0` | Max cards routed **directly to Today** per run. **Not** bounded by `recovery_batch_size` (it may exceed the batch — harmless; a small batch simply never reaches the cap in one run). Cards judged Today-worthy beyond this cap route to `Next Few Days`, noted in the report. |
 
 ### Timing windows
 
 | Parameter | Type | Default | Allowed / validation | Description |
 |---|---|---|---|---|
-| `quarantine_days` | int | `7` | `> 0` | Age at which untouched quarantined cards auto-archive **and** untouched `Agent: Auto-Updated` labels are stripped (§3, §4). |
-| `proposal_timeout_days` | int | `7` | `> 0` | Age at which open Tier 2 (`Agent: Proposed`) proposals are summarized in the report, dropped, and fingerprinted as rejected (§4). Independent of `quarantine_days`. |
-| `no_touch_hours` | int | `12` | `> 0` | A card edited by Vijay within this window is never touched at all (§4, §6). |
-| `dead_due_days` | int | `14` | `> 0` | Due dates more than this many days overdue are cleared (Tier 1); within the window they are left alone (§5.1). |
-| `optimistic_label_days` | int | `7` | `> 0` | Stale time-based labels are removable only if applied more than this many days ago (§5.1). |
+| `archive_list_days` | int | `60` | `> 0` | Age (from the SQLite-tracked entry timestamp) at which a card sitting in the Agent Archive list is archived via Trello's built-in (restorable) archive. |
+| `proposal_timeout_days` | int | `14` | `> 0` | Age at which open Tier 2 (`Agent: Proposed`) proposals are summarized in the report, dropped, and fingerprinted as rejected (§4). Independent of `archive_list_days`. |
+| `no_touch_hours` | int | `0` | `>= 0` | A card edited by Vijay within this window is never touched. **Default 0** disables the window (automatic mode acts immediately); the rejection ledger and the open-proposal lock still protect their cards regardless. |
+| `dead_due_days` | int | `14` | `> 0` | Due dates more than this many days overdue are classified against the spine (still-matters vs no-longer-matters); within the window they are left alone (§5.1). |
+| `optimistic_label_days` | int | `7` | `> 0` | Stale time-based labels are removable only if applied more than this many days ago. Also the window after which an untouched `Agent: Auto-Updated` label (a cosmetic marker) is stripped (§5.1). |
 
 ### Per-run caps (§6)
 
@@ -77,12 +100,20 @@ enforced at startup unless noted.
 | `max_recoveries_per_run` | int | `15` | `>= 0` | Hard cap on recovery routings executed per run. |
 | `max_proposals_open` | int | `20` | `>= 0` | Stop generating new Tier 2 proposals once this many are already open. |
 
-### Tiering toggles (manual promotion — P0 has no automatic promotion)
+### Automatic-mode toggles (shipped default is automatic)
+
+When a toggle is `true`, actions in that category execute automatically (Tier 1)
+with an explanatory card comment (reason + `Confidence: NN%`), **unless** the LLM
+marks the item borderline or reports a confidence below `auto_min_confidence` — in
+which case it becomes an `Agent: Proposed` card instead. When a toggle is `false`,
+the whole category is `Agent: Proposed`.
 
 | Parameter | Type | Default | Allowed / validation | Description |
 |---|---|---|---|---|
-| `tier1_stale_label_removal` | bool | `false` | `true` / `false` | When `false`, stale time-based label removals are Tier 2 (`Agent: Proposed`). Flip to `true` to auto-execute them as Tier 1 (§5.1). No automatic promotion logic exists; the Grooming Report surfaces approval rates so the human decides when to flip. |
-| `tier1_recovery_archive` | bool | `false` | `true` / `false` | When `false`, recovery archive proposals are Tier 2 (`Agent: Proposed`). Flip to `true` to auto-execute them as Tier 1 (§4). Manual only; approval rates are surfaced in the report. |
+| `tier1_stale_label_removal` | bool | `true` | `true` / `false` | Auto-remove stale time-based labels (deterministic → confidence 100, never borderline). |
+| `tier1_recovery_archive` | bool | `true` | `true` / `false` | Auto-archive recovery cards judged no longer needed (workstream Done on the spine, an event/deadline passed with nothing left to do, or a card titled `[Owner: Name]`). |
+| `tier1_due_date_clear` | bool | `true` | `true` / `false` | Auto-apply the dead-due decision (re-date from a written source, else clear) for cards classified no-longer-matters. |
+| `auto_min_confidence` | int | `70` | `0 <= x <= 100` | An auto-eligible action with LLM confidence below this (or flagged `borderline`) is downgraded to `Agent: Proposed` instead of executing. |
 
 ### Blocking / similarity (Phase 2, deterministic, no LLM)
 
@@ -115,6 +146,7 @@ heuristic-flagged cards take priority.
 | `model` | string | `"claude-sonnet-4-6"` | non-empty | Primary LLM (Anthropic), prompt-cached shared prefix. |
 | `ollama_model` | string | `"qwen3:8b"` | non-empty | Fallback LLM; receives the same unfiltered inputs as primary. |
 | `weekly_sweep_day` | string | `"sunday"` | one of `monday`…`sunday` (lowercase) | Day the full-board LLM name sweep runs (§2 wide track). |
+| `spine_review_day` | string | `"monday"` | one of `monday`…`sunday`, or `"off"` | On the first run on/after this weekday each week, create a "Review agent spine…" card at the top of Today (unless one is already open). `"off"` disables the reminder. |
 
 ### Runtime and operations
 
@@ -129,18 +161,20 @@ heuristic-flagged cards take priority.
 
 ### Cross-field validation (startup)
 
-- `recovery_today_max <= recovery_batch_size`.
+- `recovery_today_max` is **not** bounded by `recovery_batch_size` (may exceed it).
+- `no_touch_hours >= 0` (0 disables the no-touch window).
 - `name_min_length < name_max_length`.
+- `0 <= auto_min_confidence <= 100`.
 - `0.0 < narrow_hint_jaccard <= 1.0` and `0.0 < wide_block_jaccard <= 1.0`.
 - `local_tz_offsets` has both `standard` and `daylight` numeric keys.
-- Every list name in `edit_scope_lists`, `comparison_extra_lists`,
-  `quarantine_list`, and `report_list` must resolve to exactly one list on the
-  board named by `board_shortlink`.
+- Every list name in `edit_scope_lists`, `comparison_extra_lists`, and
+  `report_list` must resolve to exactly one list on the board named by
+  `board_shortlink`. `archive_list_name` need only be non-empty — it is
+  **auto-created** (positioned last) at startup if absent.
 - Both label names in `labels.*` must resolve to existing board labels.
 - `recovery_include_pattern` and `recovery_exclude_pattern` must compile as regex.
-- `weekly_sweep_day` must be a valid lowercase weekday.
-- `quarantine_list` must exist (never auto-created) so nothing is archived
-  without passing through it.
+- `weekly_sweep_day` must be a valid lowercase weekday; `spine_review_day` must be
+  a valid lowercase weekday or `"off"`.
 - `spine_page_id` must be readable by the configured Notion integration.
 - Any missing or type-mismatched field aborts the run with a message naming the
   field (fail fast).
@@ -211,19 +245,19 @@ All defaults populated.
   "recovery_include_pattern": "^Scratch",
   "recovery_exclude_pattern": "^ARCHIVE",
 
-  "quarantine_list": "Agent: Merged/Removed",
+  "archive_list_name": "Agent Archive",
   "report_list": "Today",
   "labels": {
     "auto_updated": "Agent: Auto-Updated",
     "proposed": "Agent: Proposed"
   },
 
-  "recovery_batch_size": 15,
+  "recovery_batch_size": 2,
   "recovery_today_max": 3,
 
-  "quarantine_days": 7,
-  "proposal_timeout_days": 7,
-  "no_touch_hours": 12,
+  "archive_list_days": 60,
+  "proposal_timeout_days": 14,
+  "no_touch_hours": 0,
   "dead_due_days": 14,
   "optimistic_label_days": 7,
 
@@ -232,8 +266,10 @@ All defaults populated.
   "max_recoveries_per_run": 15,
   "max_proposals_open": 20,
 
-  "tier1_stale_label_removal": false,
-  "tier1_recovery_archive": false,
+  "tier1_stale_label_removal": true,
+  "tier1_recovery_archive": true,
+  "tier1_due_date_clear": true,
+  "auto_min_confidence": 70,
 
   "wide_block_jaccard": 0.5,
   "narrow_hint_jaccard": 0.4,
@@ -244,6 +280,7 @@ All defaults populated.
   "model": "claude-sonnet-4-6",
   "ollama_model": "qwen3:8b",
   "weekly_sweep_day": "sunday",
+  "spine_review_day": "monday",
 
   "dry_run": true,
   "auto_pause_after_failures": 3,

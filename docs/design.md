@@ -40,7 +40,9 @@ Pull the full board via Trello API. Persist a snapshot to SQLite. Diff against t
 - **Implicit rejections:** any card the agent touched last run that Vijay has since edited, moved, relabeled, or pulled out of quarantine. Recorded in the rejection ledger (proposal fingerprint + card ids) so the same action is never re-proposed. The `Agent: Auto-Updated` label is removed from any card Vijay edited — his version is final.
 - **Approvals on proposals:** comments on `Agent: Proposed` cards (a reply of "yes" / "approve" executes the proposed action this run; see §4).
 - **New Scratch sweeps:** new lists matching the scratch pattern are added to recovery scope automatically.
-- **Label expiry:** `Agent: Auto-Updated` labels older than `quarantine_days` (7) are stripped; quarantined cards untouched for 7 days are archived.
+- **Label expiry / archive lifecycle:** `Agent: Auto-Updated` labels older than `optimistic_label_days` are stripped; cards in the `Agent Archive` list older than `archive_list_days` (60, from the SQLite-tracked entry time) move to Trello's built-in (restorable) archive.
+- **Notion live config:** the spine's "Rules and thresholds" section is parsed and (for valid values) overrides `agent_config.json` for this run; invalid/unknown keys are noted in the report; a missing section or unreachable spine falls back to the file.
+- **Weekly spine reminder:** on the first run on/after `spine_review_day`, a "Review agent spine…" card is created at the top of Today (unless already open).
 
 ### Phase 2 — Candidate Generation (Python, deterministic)
 No LLM calls in this phase. Facts are pre-computed and passed to the LLM as constraints, per the standing LLM-integration standard.
@@ -63,25 +65,26 @@ All LLM output is structured JSON, schema-validated in Python. Anything malforme
 Python enforces guardrails (§6) then executes per the confidence model (§4). All Trello writes go through `agent-shared-library`'s Trello module with retry/backoff.
 
 ### Phase 5 — Run Report
-One **"Grooming Report"** card pinned at the top of `Today`, replaced each run (single daily run at 6:30 AM). Contents: actions auto-applied (with links), open proposals awaiting review, quarantine contents and days remaining, rejections detected, and health stats (open duplicate clusters remaining, scratch backlog count, hygiene coverage % of in-scope cards). Failures alert via the shared alerting module (Gmail SMTP). Three consecutive failed runs auto-pauses the agent (same pattern as granola-to-notion).
+One **"Grooming Report"** card pinned at the top of `Today`, replaced each run (single daily run at 6:30 AM). It has exactly these five sections, in order: **"Still overdue and possibly urgent"**, **"Awaiting your decision"** (open proposals), **"Recently archived"** (cards moved to `Agent Archive` this run and cards approaching their 60-day Trello-archive date), **"Done automatically"**, and **"Health stats"** (scratch backlog, hygiene coverage, Tier-2 approval rates, auto-mode flags, Notion override notes). Failures alert via the shared alerting module (Gmail SMTP). Three consecutive failed runs auto-pauses the agent (same pattern as granola-to-notion).
 
 ## 4. Human-in-the-Loop Model
 
-Undo-by-default rather than approve-by-default: high-confidence actions execute immediately, but nothing is permanent for 7 days, and reviewing is a glance while undoing is a drag. Two agent labels total.
+Undo-by-default rather than approve-by-default, and **automatic mode is the shipped default**: high-confidence actions execute immediately, but nothing is ever hard-deleted, and reviewing is a glance while undoing is a drag. Two agent labels total.
 
 ### Tier 1 — Auto-executed, labeled `Agent: Auto-Updated`
-- **Hygiene edits.** Renames always preserve the original as the first description line (`Original title: ...`), so a bad rewrite loses nothing.
-- **Merges.** Survivor gets the merged name and a consolidated description with one section per source card (date, original text, shortlink). Labels are **unioned across sources, excluding time-based labels** (`1. Today (must do)`, `2. Next Few Days (must do)`, `3. This Week (must do)`), which are already diluted; survivor keeps only its own time-based labels. Losing cards are **not archived** — they move to the quarantine list **`Agent: Merged/Removed`** with a comment linking to the survivor.
-- **Recoveries.** Scratch cards route into `Inbox / Triage` (or merge into an active card per above).
+- **Content placement.** Only a rename touches the card body: it preserves the original as the first description line (`Original title: ...`). **Everything else the agent writes goes in card comments** — change explanations, old due dates, and the merge audit trail (links) — each ending with `Confidence: NN%`.
+- **Merges.** The survivor's **description** holds task content only: its original title/text plus one `From: <name>` section per source card. The audit trail (links, "merged in N duplicates") is a **comment**, so the string-containment invariant never depends on audit metadata. Labels are **unioned across sources, excluding time-based labels** (`1. Today (must do)`, `2. Next Few Days (must do)`, `3. This Week (must do)`); the survivor keeps only its own time-based labels. Losing cards move to the **TOP of the single `Agent Archive` list** with a comment linking to the survivor.
+- **Automatic categories** (each gated by a config flag, all shipped `true`): stale time-based label removal (`tier1_stale_label_removal`), recovery archiving (`tier1_recovery_archive`), and dead-due handling (`tier1_due_date_clear`). When the flag is `true` the action auto-executes with an explanatory comment; a **borderline/low-confidence** call (below `auto_min_confidence`) is downgraded to `Agent: Proposed`. When the flag is `false`, the whole category is proposed.
+- **Renames** follow the "Card naming standard" section of the spine (falling back to the same hardcoded rules if that section is absent).
 
-**Review mechanic:** passive. If something looks wrong, *just fix it* — revert the name, drag the quarantined card back to any list, re-add a label. No need to touch the agent label: the next run's diff detects the edit, treats Vijay's version as final, records a rejection fingerprint (never re-proposed), and removes `Agent: Auto-Updated` itself. Manually removing the label works too and is treated identically. Untouched `Agent: Auto-Updated` labels auto-expire after 7 days; untouched quarantined cards auto-archive after 7 days. Nothing is ever hard-deleted, and in P0 nothing reaches Trello's archive without passing through quarantine.
+**Review mechanic:** passive. If something looks wrong, *just fix it* — revert the name, drag the archived card back to any list, re-add a label. The next run's diff detects the edit, treats Vijay's version as final, records a rejection fingerprint (never re-proposed), and removes `Agent: Auto-Updated` itself. Manually removing the label works too. Untouched `Agent: Auto-Updated` labels auto-expire after `optimistic_label_days`. Cards that sit in the `Agent Archive` list longer than `archive_list_days` (60) are moved to Trello's built-in **(restorable)** archive; entry timestamps are tracked in SQLite. Nothing is ever hard-deleted, and nothing reaches Trello's archive without passing through the `Agent Archive` list.
 
 ### Tier 2 — Flagged only, labeled `Agent: Proposed`
-The agent makes no change. It adds the label plus a comment stating the recommended action and reason (e.g., "Likely duplicate of [link], but owners conflict — recommend merging into that card"). 
+The agent makes no change. It adds the label plus a comment stating the recommended action, reason, and `Confidence: NN%` (from an extended LLM output schema).
 
 - **Approve:** reply "yes"/"approve" on the comment (agent reads comments on `Agent: Proposed` cards at run start and executes), or simply do the action yourself.
 - **Reject:** remove the label (or reply "no").
-- **Timeout:** proposals older than 7 days are summarized in the run report, then dropped and fingerprinted as rejected.
+- **Timeout:** proposals older than `proposal_timeout_days` (14) are summarized in the run report, then dropped and fingerprinted as rejected.
 
 ### Tier assignment (LLM decides, Python bounds)
 Deterministic floors/ceilings applied after the LLM's confidence call:
@@ -92,14 +95,15 @@ Deterministic floors/ceilings applied after the LLM's confidence call:
 | Renames and description restructuring | Always Tier 1 (loss-free by construction) |
 | Merges across different person labels, or with conflicting due dates/owners | Always Tier 2 |
 | Merges where survivor lives outside edit scope | Always Tier 2 |
-| Any archive proposal from recovery triage | Always Tier 2 for the first two weeks, then revisit |
-| Cards Vijay edited in the last 12 hours | Never touched at all |
+| Stale-label / recovery-archive / dead-due actions | Tier 1 when the category flag is on **and** not borderline; else Tier 2 |
+| Any auto-eligible action below `auto_min_confidence` or flagged borderline | Tier 2 (`Agent: Proposed`) |
+| Cards Vijay edited within `no_touch_hours` (default 0 = disabled) | Never touched at all |
 
 ## 5. P0 Capabilities — Detail
 
 ### 5.1 (a) Hygiene: due dates, labels, names, descriptions
-- **Dead due dates:** due dates more than `dead_due_days` (14) overdue are cleared (Tier 1), with the original date noted in a card comment. Due dates within 14 days past are left alone (may still be meaningful).
-- **Stale time-based labels:** time-based labels on cards *not* in the matching list, where the label was applied > `optimistic_label_days` (7) ago, are removed — Tier 2 for the first two weeks (label semantics are personal), then promoted to Tier 1 if rejection rate is low.
+- **Dead due dates:** due dates more than `dead_due_days` (14) overdue are first **classified against the spine**. *Still-matters* (its workstream is Active, or the card text shows a task that still must happen) → **never touched**, listed under "Still overdue and possibly urgent" in the report. *No-longer-matters* → a new date is set **only if one is actually written** in the card text or as a workstream deadline on the spine (the LLM must cite the exact source substring, verified in Python; never guessed); otherwise the date is cleared. The old date is always preserved in a comment. Executed automatically per `tier1_due_date_clear` (borderline calls become proposals). Due dates within 14 days past are left alone.
+- **Stale time-based labels:** time-based labels on cards *not* in the matching list, where the label was applied > `optimistic_label_days` (7) ago, are removed automatically (Tier 1) per `tier1_stale_label_removal`, with an explanatory comment.
 - **Names:** typo correction, capitalization, verb-first phrasing where natural, person names preserved and moved to a consistent position (`Colin — inputs on RSM comp` style). Pipe-separated multi-part names keep the primary action as the title; remaining segments become description bullets (no card splitting in P0). Original title always preserved in description.
 - **Descriptions:** light structuring only — never delete content. If a merge or rename adds material, it is organized under `Original title`, `Context`, and per-source sections.
 - One-time manual setup fix (not agent work): merge the two duplicate `Logan` labels.
@@ -113,7 +117,7 @@ Deterministic floors/ceilings applied after the LLM's confidence call:
 ### 5.3 (c) Duplicate detection and merge
 - Two-track candidate generation per Phase 2; adjudication and merge composition per Phase 3; tiering per §4.
 - Survivor selection priority: card with the richest description → most recent activity → highest list (Today > Inbox > NFD).
-- Merged description consolidates *all* source content (context fragmentation is the core problem this solves). Source cards remain readable in quarantine for 7 days, each linking to the survivor, so comments/attachments on losers stay reachable during review. If a losing card has attachments or checklists, the merge is forced Tier 2.
+- Merged description consolidates *all* source content (context fragmentation is the core problem this solves). Source cards remain readable at the top of the `Agent Archive` list, each linking to the survivor, so comments/attachments on losers stay reachable during review. If a losing card has attachments or checklists, the merge is forced Tier 2.
 - `related-but-distinct` clusters are not merged; the agent cross-links them with comments (cheap, reversible, preserves the relationship for future runs).
 
 ## 6. Guardrails (enforced in Python, not the LLM)
@@ -133,17 +137,21 @@ Deterministic floors/ceilings applied after the LLM's confidence call:
 - `proposals(proposal_id, run_id, fingerprint, card_ids_json, action_json, reason, status[open/approved/rejected/expired], opened_ts)`
 - `rejections(fingerprint, source[edit/label-removal/comment/timeout], ts)`
 - `recovery_ledger(card_id, source_list, disposition, ts)`
+- `archive_ledger(card_id, entered_ts)` — when a card entered the `Agent Archive` list (drives the 60-day Trello-archive clock)
+- `kv(key, value)` — small scratch state (e.g. `last_reminder_week` for the weekly spine reminder)
 
 ### 7.2 Notion context spine
 **Created:** `Trello Grooming Agent Spine` (private workspace page, page ID `3966c55b25638155a69dfdb1421d5d3e`), read at run start, human-edited in P0. Sections:
 - **Active Workstreams:** name, status (Active / Winding down / Done / Paused), one-line context. Seeded from the 2026-07-06 board: Sales Summit (Done, wrap-up only), AdmitHub rollout, Adaptive Connect, comp plans (RSM/AE), Q3 objectives and forecasts, intake escalations, Forge, weekend referral strategy (Ty), sales collateral/Sales Hub, hiring and onboarding, agents and knowledge systems.
 - **People:** name, role, relationship to Vijay's work. Roles are inferred from the board and flagged for correction.
 - **Notes for the agent:** standing interpretation rules (Done-workstream cards are archive candidates, unknown-context cards default to Inbox / Triage routing).
+- **Card naming standard:** free-text rules the rename pass must follow (falls back to hardcoded rules if the section is absent).
+- **Rules and thresholds:** live config overrides read each run — `- key: value` lines (trailing prose allowed) for any behavioral parameter. Valid values override `agent_config.json` for that run; the JSON on disk stays authoritative, so a default change must update both (see CLAUDE.md).
 
 The spine is world state; `agent_config.json` is agent settings. Agent-written spine updates are post-P0. One-time task: ensure the page is shared with the Notion internal integration the agent will use.
 
 ### 7.3 `agent_config.json` (schema locked in `docs/config.md` before build)
-Key parameters and defaults: `board_shortlink: RwdXsia3`; `edit_scope_lists: [Today, Inbox / Triage, Next Few Days]`; `comparison_extra_lists: [This Week]`; `recovery_include_pattern: ^Scratch`; `recovery_exclude_pattern: ^ARCHIVE`; `recovery_today_max: 3`; `quarantine_list: Agent: Merged/Removed`; `report_list: Today`; `labels: {auto_updated: "Agent: Auto-Updated", proposed: "Agent: Proposed"}`; `quarantine_days: 7`; `no_touch_hours: 12`; `dead_due_days: 14`; `optimistic_label_days: 7`; `recovery_batch_size: 15`; per-run caps per §6; `model: claude-sonnet-4-6`; `ollama_model: qwen3:8b`; `weekly_sweep_day: sunday`; `dry_run: true` (ships true); `auto_pause_after_failures: 3`; `spine_page_id: 3966c55b25638155a69dfdb1421d5d3e`; `entity_keywords_seed: [...]`.
+Key parameters and defaults: `board_shortlink: RwdXsia3`; `edit_scope_lists: [Today, Inbox / Triage, Next Few Days]`; `comparison_extra_lists: [This Week]`; `recovery_include_pattern: ^Scratch`; `recovery_exclude_pattern: ^ARCHIVE`; `recovery_today_max: 3`; `archive_list_name: Agent Archive` (single archive list, auto-created last); `report_list: Today`; `labels: {auto_updated: "Agent: Auto-Updated", proposed: "Agent: Proposed"}`; `archive_list_days: 60`; `no_touch_hours: 0`; `dead_due_days: 14`; `optimistic_label_days: 7`; `recovery_batch_size: 2`; `proposal_timeout_days: 14`; `tier1_stale_label_removal: true`; `tier1_recovery_archive: true`; `tier1_due_date_clear: true`; `auto_min_confidence: 70`; per-run caps per §6; `model: claude-sonnet-4-6`; `ollama_model: qwen3:8b`; `weekly_sweep_day: sunday`; `spine_review_day: monday`; `dry_run: true` (ships true); `auto_pause_after_failures: 3`; `spine_page_id: 3966c55b25638155a69dfdb1421d5d3e`; `entity_keywords_seed: [...]`. The spine's "Rules and thresholds" section can override any of these per run (see docs/config.md precedence).
 
 Credentials come from global `C:\Users\VJ\VS Code Projects\config\.env.json` — Trello key/token, Notion token, `anthropic_api_keys.work-todo-trello-grooming-agent`, Gmail SMTP for alerts. Shared library receives all settings as parameters and owns no config files.
 
@@ -181,7 +189,7 @@ Sonnet 4.6 ($3/$15 per MTok) for all three judgment calls — merge composition 
 ## 11. Getting Started — Step by Step
 
 ### Step 0 — One-time board and workspace prep (~15 min, manual)
-1. On the Fira board, create labels `Agent: Auto-Updated` (pick an unused color) and `Agent: Proposed`, and a list `Agent: Merged/Removed` (position it after Inbox / Triage).
+1. On the Fira board, create labels `Agent: Auto-Updated` (pick an unused color) and `Agent: Proposed`. The single `Agent Archive` list is **auto-created** at startup (positioned last) — no manual list creation needed.
 2. Merge the two duplicate `Logan` labels (move cards off the lesser-used one, delete it).
 3. The Notion spine already exists (`Trello Grooming Agent Spine`, §7.2): review it, correct any inferred roles/statuses, and share the page with the Notion internal integration the agent will use.
 4. In the Anthropic Console, create an API key named `work-todo-trello-grooming-agent`. Add it to `C:\Users\VJ\VS Code Projects\config\.env.json` under `anthropic_api_keys.work-todo-trello-grooming-agent`. Confirm the Notion token and Gmail SMTP entries exist, and confirm the Trello key/token belongs to the account that owns the Fira board (single-member board, so likely yes, but verify if Fira lives in a company workspace).

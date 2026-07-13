@@ -26,10 +26,15 @@ One scheduled run per day, five phases (design §3):
 4. **Validated execution** — Python enforces every guardrail (caps, merge
    string-containment invariant, no-touch window, never-touch list, rejection
    ledger) **before** any Trello write. Tier 1 executes; Tier 2 becomes an
-   `Agent: Proposed` card. Nothing is hard-deleted; nothing reaches Trello's archive
-   without passing through the `Agent: Merged/Removed` quarantine list.
+   `Agent: Proposed` card (automatic mode is the shipped default: the `tier1_*`
+   flags auto-execute confident actions with an explanatory comment; borderline
+   ones become proposals). Nothing is hard-deleted; nothing reaches Trello's
+   built-in (restorable) archive without first passing through the single
+   `Agent Archive` list (auto-created; cards older than `archive_list_days` are
+   Trello-archived).
 5. **Run report** — a single "Grooming Report" card at the top of `Today`, replaced
-   each run, plus a local report file.
+   each run (sections: Still overdue and possibly urgent / Awaiting your decision /
+   Recently archived / Done automatically / Health stats), plus a local report file.
 
 ## Layout
 
@@ -70,8 +75,10 @@ C:\Users\VJ\AppData\Local\Programs\Python\Python313\python.exe
    `notion.integration_token`, `gmail_sender`, `gmail_password`, `ollama_endpoint`,
    and `anthropic_api_keys.work-todo-trello-grooming-agent`.
 3. One-time board/workspace prep (design §11, Step 0): create the labels
-   `Agent: Auto-Updated` and `Agent: Proposed` and the list `Agent: Merged/Removed`;
-   merge the two duplicate `Logan` labels; review/share the Notion spine page.
+   `Agent: Auto-Updated` and `Agent: Proposed` (the single `Agent Archive` list is
+   auto-created at startup); merge the two duplicate `Logan` labels; review/share
+   the Notion spine page — including its optional "Rules and thresholds" (live
+   config overrides) and "Card naming standard" sections.
 4. `agent_config.json` ships with `dry_run: true`. Behavioral parameters live only
    here; secrets live only in `.env.json`.
 

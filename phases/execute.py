@@ -116,7 +116,15 @@ class ExecutionResult:
 # Agent Archive list — single-list lifecycle (replaces the old quarantine list)
 # ---------------------------------------------------------------------------
 
-ARCHIVE_MOVED_WORDING = "moved to Trello's archive (restorable)"
+# Two distinct lifecycle stages, two distinct wordings:
+#  - moving a card INTO the Agent Archive list this run (merge loser, recovery
+#    archive, approved archive) → it stays visible there for archive_list_days;
+#  - a card LEAVING the list after archive_list_days → Trello's built-in archive.
+TRELLO_ARCHIVE_WORDING = "moved to Trello's archive (restorable)"
+
+
+def archive_list_wording(settings) -> str:
+    return f"moved to the Agent Archive list (visible {settings.archive_list_days} days)"
 
 
 def ensure_archive_list(board, settings, mutator):
@@ -180,7 +188,8 @@ def _in_scope_ids(board, settings) -> set[str]:
 def process_rejections(db_path, mutator, board, rejections, settings, now_iso, result):
     """Record diff-detected rejections; strip Auto-Updated from edited cards."""
     for rej in rejections:
-        storage.add_rejection(db_path, rej["fingerprint"], rej["source"], now_iso)
+        if not mutator.dry_run:
+            storage.add_rejection(db_path, rej["fingerprint"], rej["source"], now_iso)
         result.rejections_recorded.append(rej)
         if rej.get("remove_label"):
             card = board.card_by_id(rej["card_id"])
@@ -190,12 +199,13 @@ def process_rejections(db_path, mutator, board, rejections, settings, now_iso, r
                 mutator.set_labels(card.id, remaining)
 
 
-def expire_proposals(db_path, board, open_proposals, settings, now_utc, now_iso, result):
+def expire_proposals(db_path, board, open_proposals, settings, now_utc, now_iso, result, dry_run=False):
     """Expire open proposals older than proposal_timeout_days; fingerprint them."""
     for prop in open_proposals:
         if g.proposal_expired(prop.get("opened_ts"), now_utc, settings):
-            storage.set_proposal_status(db_path, prop["proposal_id"], "expired")
-            storage.add_rejection(db_path, prop["fingerprint"], "timeout", now_iso)
+            if not dry_run:
+                storage.set_proposal_status(db_path, prop["proposal_id"], "expired")
+                storage.add_rejection(db_path, prop["fingerprint"], "timeout", now_iso)
             result.expired_proposals.append(prop)
 
 
@@ -229,17 +239,18 @@ def expire_labels_and_archive(db_path, mutator, board, settings, now_utc, result
             entered = storage.archive_entry_ts(db_path, card.id) or card.last_activity
             if g.archive_list_expired(entered, now_utc, settings):
                 mutator.archive_card(card.id)
-                storage.remove_archive_entry(db_path, card.id)
+                if not mutator.dry_run:
+                    storage.remove_archive_entry(db_path, card.id)
                 result.applied.append({"type": "trello_archive", "card_id": card.id})
                 result.recently_archived.append({"card_id": card.id, "name": card.name,
-                                                 "note": ARCHIVE_MOVED_WORDING})
+                                                 "url": card.url, "note": TRELLO_ARCHIVE_WORDING})
             else:
                 days_in = g.days_since(entered, now_utc,
                                        settings.tz_standard_offset, settings.tz_daylight_offset) or 0
                 days_left = settings.archive_list_days - days_in
                 if days_left <= 10:
                     result.recently_archived.append(
-                        {"card_id": card.id, "name": card.name,
+                        {"card_id": card.id, "name": card.name, "url": card.url,
                          "note": f"{round(days_left, 1)} day(s) until Trello archive"})
 
 
@@ -266,10 +277,10 @@ def compose_survivor_desc(survivor, losers) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
-def _merge_audit_comment(survivor, losers, verdict) -> str:
+def _merge_audit_comment(survivor, losers, verdict, settings) -> str:
     """The audit-trail comment (links + confidence) written to the survivor."""
     src = ", ".join(f"{l.name} ({l.url or l.id})" for l in losers)
-    line = f"Merged in {len(losers)} duplicate(s): {src}. Sources {ARCHIVE_MOVED_WORDING}."
+    line = f"Merged in {len(losers)} duplicate(s): {src}. Sources {archive_list_wording(settings)}."
     reason = verdict.get("reason")
     if reason:
         line += f" {reason}"
@@ -327,24 +338,26 @@ def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -
         mutator.rename(survivor.id, verdict["new_name"])
     mutator.set_description(survivor.id, final_desc)
     mutator.set_labels(survivor.id, final_labels)
-    mutator.add_comment(survivor.id, _merge_audit_comment(survivor, losers, verdict))
+    mutator.add_comment(survivor.id, _merge_audit_comment(survivor, losers, verdict, settings))
 
     # Move losers to the TOP of the Agent Archive list with a link back.
     for loser in losers:
         mutator.add_comment(
             loser.id,
-            f"Merged into {survivor.url or survivor.id}; {ARCHIVE_MOVED_WORDING}.")
+            f"Merged into {survivor.url or survivor.id}; {archive_list_wording(settings)}.")
         mutator.move_card(loser.id, archive_list.id, position="top")
-        storage.add_archive_entry(db_path, loser.id, now_iso)
+        if not mutator.dry_run:
+            storage.add_archive_entry(db_path, loser.id, now_iso)
         result.recently_archived.append({"card_id": loser.id, "name": loser.name,
-                                         "note": ARCHIVE_MOVED_WORDING})
+                                         "url": loser.url, "note": archive_list_wording(settings)})
 
-    storage.record_action(
-        db_path, now_iso, now_iso, g.TIER1, "merge",
-        [survivor.id] + loser_ids,
-        {"survivor_id": survivor.id, "loser_ids": loser_ids, "new_name": verdict.get("new_name")},
-        "success",
-    )
+    if not mutator.dry_run:
+        storage.record_action(
+            db_path, now_iso, now_iso, g.TIER1, "merge",
+            [survivor.id] + loser_ids,
+            {"survivor_id": survivor.id, "loser_ids": loser_ids, "new_name": verdict.get("new_name")},
+            "success",
+        )
     result.applied.append({"type": "merge", "survivor_id": survivor.id, "loser_ids": loser_ids})
     return True
 
@@ -457,12 +470,18 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         _apply_rename(mutator, board, card, v["new_name"], v.get("new_desc"), auto_id, settings)
         mutator.add_comment(card.id, _change_comment(
             f"Renamed from '{old_name}' to '{v['new_name']}'", v))
-        storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
-                              {"new_name": v["new_name"], "original_name": old_name}, "success")
+        if not mutator.dry_run:
+            storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
+                                  {"new_name": v["new_name"], "original_name": old_name}, "success")
         result.applied.append({"type": "rename", "card_id": card.id, "new_name": v["new_name"]})
 
     # -- Dead-due handling --------------------------------------------------
+    # Every dead-due in-scope card must resolve to an escalation OR a fix — never
+    # silently dropped. Cards the LLM classifies drive the decision; any dead-due
+    # card the LLM did not classify defaults to a "still overdue" escalation
+    # (safe: no mutation, but visible).
     tier2_due = []
+    handled_due: set[str] = set()
     for v in hygiene_verdicts:
         cid = v["card_id"]
         if cid not in dead_due_ids and not v.get("clear_due") and not v.get("due_status"):
@@ -470,12 +489,14 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         card = board.card_by_id(cid)
         if card is None or not card.due:
             continue
+        handled_due.add(cid)
 
         status = v.get("due_status")
         if status == "still_matters":
             # Never touched; surfaced in the report so it stays visible.
-            result.still_overdue.append({"card_id": cid, "name": card.name,
-                                         "due": card.due, "reason": v.get("reason", "")})
+            result.still_overdue.append({"card_id": cid, "name": card.name, "url": card.url,
+                                         "due": card.due,
+                                         "reason": v.get("reason", "Workstream still active.")})
             continue
 
         # no_longer_matters (or legacy clear_due=True): re-date only from a written
@@ -506,9 +527,22 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
             mutator.clear_due(cid)
             atype = "dead_due_clear"
         _add_label(mutator, card, auto_id)
-        storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
-                              {"original_due": card.due, "new_due": new_due if redate else None}, "success")
-        result.applied.append({"type": atype, "card_id": cid})
+        if not mutator.dry_run:
+            storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
+                                  {"original_due": card.due, "new_due": new_due if redate else None}, "success")
+        result.applied.append({"type": atype, "card_id": cid, "new_due": new_due if redate else None})
+
+    # Safety net: any overdue in-scope card the LLM did not classify is escalated,
+    # not silently dropped.
+    for cid in dead_due_ids:
+        if cid in handled_due:
+            continue
+        card = board.card_by_id(cid)
+        if card is None or not card.due:
+            continue
+        result.still_overdue.append({"card_id": cid, "name": card.name, "url": card.url,
+                                     "due": card.due,
+                                     "reason": "Not classified this run — left untouched, review."})
 
     result.counters["renames"] = sum(1 for a in result.applied if a["type"] == "rename")
     return tier2_due
@@ -554,9 +588,10 @@ def execute_stale_labels(db_path, mutator, board, stale_pairs, settings, now_utc
             remaining.append(auto_id)
         mutator.set_labels(card.id, remaining)
         mutator.add_comment(card.id, _change_comment(f"Removed stale label '{label}'", action))
-        storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
-                              [card.id], {"label": label}, "success")
-        result.applied.append({"type": "stale_label_removal", "card_id": card.id})
+        if not mutator.dry_run:
+            storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
+                                  [card.id], {"label": label}, "success")
+        result.applied.append({"type": "stale_label_removal", "card_id": card.id, "label": label})
     return tier2
 
 
@@ -618,13 +653,16 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             # Tier 1 archive routes through the Agent Archive list (never hard-archive).
             if archive_list:
                 mutator.add_comment(card.id, _change_comment(
-                    f"Recovered from {origin}; no longer needed, {ARCHIVE_MOVED_WORDING}", v))
+                    f"Recovered from {origin}; no longer needed, {archive_list_wording(settings)}", v))
                 mutator.move_card(card.id, archive_list.id, position="top")
-                storage.add_archive_entry(db_path, card.id, now_iso)
-                storage.add_recovery(db_path, card.id, origin, "archive", now_iso)
+                if not mutator.dry_run:
+                    storage.add_archive_entry(db_path, card.id, now_iso)
+                    storage.add_recovery(db_path, card.id, origin, "archive", now_iso)
                 result.recoveries.append({"card_id": card.id, "disposition": "archive"})
+                result.applied.append({"type": "recovery_archive", "card_id": card.id,
+                                       "origin": origin})
                 result.recently_archived.append({"card_id": card.id, "name": card.name,
-                                                 "note": ARCHIVE_MOVED_WORDING})
+                                                 "url": card.url, "note": archive_list_wording(settings)})
                 executed += 1
             continue
 
@@ -640,8 +678,11 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             if assign_tier(facts, settings) == g.TIER1 and board.card_by_id(target):
                 mutator.add_comment(card.id, f"Recovered from {origin}; merged into active card.")
                 execute_merge(db_path, mutator, board, verdict, settings, now_iso, result)
-                storage.add_recovery(db_path, card.id, origin, "merge", now_iso)
+                if not mutator.dry_run:
+                    storage.add_recovery(db_path, card.id, origin, "merge", now_iso)
                 result.recoveries.append({"card_id": card.id, "disposition": "merge"})
+                result.applied.append({"type": "recovery_merge", "card_id": card.id,
+                                       "origin": origin, "survivor_id": target})
                 executed += 1
             else:
                 tier2_archives.append(v)  # cautious: propose instead
@@ -675,8 +716,12 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
 
         mutator.add_comment(card.id, f"Recovered from {origin} by grooming agent.")
         mutator.move_card(card.id, dest_id)
-        storage.add_recovery(db_path, card.id, origin, disp_final, now_iso)
+        if not mutator.dry_run:
+            storage.add_recovery(db_path, card.id, origin, disp_final, now_iso)
         result.recoveries.append({"card_id": card.id, "disposition": disp_final})
+        dest_name = board.list_by_id(dest_id).name if board.list_by_id(dest_id) else disp_final
+        result.applied.append({"type": "recovery_route", "card_id": card.id,
+                               "origin": origin, "dest": dest_name})
         executed += 1
 
     result.counters["recoveries"] = executed
@@ -710,10 +755,37 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
         if card and proposed_id:
             _add_label(mutator, card, proposed_id)
             mutator.add_comment(anchor, _proposal_comment(action))
-        pid = storage.add_proposal(db_path, now_iso, fp, card_ids, action,
-                                   action.get("reason", ""), now_iso)
-        result.proposals_opened.append({"proposal_id": pid, "fingerprint": fp, "type": action["type"]})
+        if mutator.dry_run:
+            pid = 0
+        else:
+            pid = storage.add_proposal(db_path, now_iso, fp, card_ids, action,
+                                       action.get("reason", ""), now_iso)
+        result.proposals_opened.append({
+            "proposal_id": pid, "fingerprint": fp, "type": action["type"],
+            "card_id": anchor,
+            "title": card.name if card else anchor,
+            "url": card.url if card else "",
+            "action_desc": _proposed_action_desc(action, board),
+            "reason": action.get("reason", ""),
+            "confidence": action.get("confidence"),
+        })
         open_count += 1
+
+
+def _proposed_action_desc(action: dict, board) -> str:
+    """Human-readable one-liner for the proposed action (title/url friendly)."""
+    atype = action.get("type")
+    if atype == "merge":
+        survivor = board.card_by_id(action.get("survivor_id"))
+        tgt = f"{survivor.name} ({survivor.url})" if survivor else action.get("survivor_id", "")
+        return f"merge duplicates into {tgt}"
+    if atype == "stale_label_removal":
+        return "remove a stale time-based label"
+    if atype == "recovery_archive":
+        return "move to the Agent Archive list (no longer needed)"
+    if atype in ("dead_due_clear", "due_redate"):
+        return "clear or re-date a long-overdue due date"
+    return atype or "review"
 
 
 # ---------------------------------------------------------------------------
@@ -728,12 +800,14 @@ def process_approvals(db_path, mutator, board, approvals, settings, now_utc, now
         if decision == "approve":
             action = prop.get("action", {})
             _execute_approved(db_path, mutator, board, action, settings, now_utc, now_iso, result)
-            storage.set_proposal_status(db_path, prop["proposal_id"], "approved")
+            if not mutator.dry_run:
+                storage.set_proposal_status(db_path, prop["proposal_id"], "approved")
             result.applied.append({"type": "approved_" + action.get("type", "action"),
                                    "proposal_id": prop["proposal_id"]})
         elif decision == "reject":
-            storage.set_proposal_status(db_path, prop["proposal_id"], "rejected")
-            storage.add_rejection(db_path, prop["fingerprint"], "comment", now_iso)
+            if not mutator.dry_run:
+                storage.set_proposal_status(db_path, prop["proposal_id"], "rejected")
+                storage.add_rejection(db_path, prop["fingerprint"], "comment", now_iso)
             result.rejections_recorded.append({"fingerprint": prop["fingerprint"], "source": "comment"})
 
 
@@ -765,11 +839,12 @@ def _execute_approved(db_path, mutator, board, action, settings, now_utc, now_is
         archive_list = board.list_by_name(settings.archive_list_name)
         card = board.card_by_id(action["card_ids"][0])
         if card and archive_list:
-            mutator.add_comment(card.id, f"Approved; {ARCHIVE_MOVED_WORDING}.")
+            mutator.add_comment(card.id, f"Approved; {archive_list_wording(settings)}.")
             mutator.move_card(card.id, archive_list.id, position="top")
-            storage.add_archive_entry(db_path, card.id, now_iso)
+            if not mutator.dry_run:
+                storage.add_archive_entry(db_path, card.id, now_iso)
             result.recently_archived.append({"card_id": card.id, "name": card.name,
-                                             "note": ARCHIVE_MOVED_WORDING})
+                                             "url": card.url, "note": archive_list_wording(settings)})
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +905,10 @@ def maybe_create_spine_reminder(db_path, mutator, board, settings, spine, now_ut
     week_key = f"{iso[0]}-{iso[1]:02d}"
     if storage.kv_get(db_path, "last_reminder_week") == week_key:
         return  # already handled this week
-    storage.kv_set(db_path, "last_reminder_week", week_key)
+    # In dry-run we do NOT consume the weekly slot, so a later live run still
+    # creates the card for real.
+    if not mutator.dry_run:
+        storage.kv_set(db_path, "last_reminder_week", week_key)
 
     today_list = board.list_by_name(settings.report_list)
     if today_list is None:

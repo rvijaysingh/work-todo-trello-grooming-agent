@@ -1,10 +1,15 @@
 ## Task: hygiene pass
 
 You are given in-scope cards: names flagged by heuristics (priority), all in-scope
-names (you may nominate additional renames), and card ids with dead due dates
-(more than the dead-due window past).
+names (you may nominate additional renames), and `dead_dues` — cards more than the
+dead-due window past, each with its id, name, current due date, and a description
+snippet.
 
 {hygiene_json}
+
+IMPORTANT: return a `due_status` for EVERY card in `dead_dues` (do not skip any) —
+each overdue card must resolve to an escalation (still_matters) or a fix
+(no_longer_matters). A card you do not classify is left untouched and escalated.
 
 For each card that needs cleanup, return one edit object with:
 - "card_id": the card id (only ids from the data above)

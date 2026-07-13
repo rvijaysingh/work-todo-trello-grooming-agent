@@ -146,7 +146,7 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     approvals = sd.parse_approvals(board, open_proposals, settings)
 
     ex.process_rejections(db_path, mutator, board, rejections, settings, now_iso, result)
-    ex.expire_proposals(db_path, board, open_proposals, settings, now_utc, now_iso, result)
+    ex.expire_proposals(db_path, board, open_proposals, settings, now_utc, now_iso, result, dry_run=dry_run)
     ex.process_approvals(db_path, mutator, board, approvals, settings, now_utc, now_iso, result)
     ex.expire_labels_and_archive(db_path, mutator, board, settings, now_utc, result)
 
@@ -193,8 +193,10 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     rep.publish_report_card(mutator, board, settings, report_text)
 
     # Persist post-run snapshot (agent's intended end-state, so its own changes
-    # are not mis-read as user edits next run).
-    storage.save_snapshot(db_path, run_id, now_iso, _post_snapshot(board, mutator))
+    # are not mis-read as user edits next run). Skipped in dry-run — a simulated
+    # end-state must never become the baseline a later real run diffs against.
+    if not dry_run:
+        storage.save_snapshot(db_path, run_id, now_iso, _post_snapshot(board, mutator))
     result.counters["board_writes"] = 0 if dry_run else len(mutator.log)
     return result, report_text, mutator
 
@@ -215,14 +217,30 @@ def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity
                         "wide_pairs": [{"a": p["a"].id, "b": p["b"].id} for p in wide]}
     hyg_payload = {"flagged": [{"id": c.id, "name": c.name} for c in hyg["flagged_renames"]],
                    "in_scope": [{"id": c.id, "name": c.name} for c in hyg["all_in_scope"]],
-                   "dead_dues": [c.id for c in hyg["dead_dues"]]}
+                   "dead_dues": [{"id": c.id, "name": c.name, "due": c.due,
+                                  "desc": (c.desc or "")[:300]} for c in hyg["dead_dues"]]}
     rec_payload = {"cards": [{"id": c.id, "name": c.name, "origin": c.list_name} for c in rec_batch]}
 
+    recovery = judge.recovery_triage(llm, prompts, prefix, rec_payload, known_ids)
+    recovery = _default_recovery(recovery, rec_batch)
     return {
         "clusters": judge.adjudicate_clusters(llm, prompts, prefix, clusters_payload, known_ids, src_text, spine_terms),
         "hygiene": judge.hygiene_pass(llm, prompts, prefix, hyg_payload, known_ids, src_text, spine_terms),
-        "recovery": judge.recovery_triage(llm, prompts, prefix, rec_payload, known_ids),
+        "recovery": recovery,
     }
+
+
+def _default_recovery(recovery_verdicts, rec_batch):
+    """Ensure every card in the recovery batch drains: any card the LLM did not
+    dispose defaults to Inbox / Triage (the design's ambiguous-context default),
+    so a non-empty batch never silently produces zero dispositions."""
+    disposed = {v.get("card_id") for v in recovery_verdicts}
+    out = list(recovery_verdicts)
+    for c in rec_batch:
+        if c.id not in disposed:
+            out.append({"card_id": c.id, "disposition": "inbox",
+                        "reason": "No disposition returned; routed to Inbox / Triage by default."})
+    return out
 
 
 def _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due, tier2_stale):

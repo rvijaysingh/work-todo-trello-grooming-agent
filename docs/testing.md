@@ -275,6 +275,11 @@ Each row: LLM proposes an action; Python applies the deterministic floor/ceiling
 | Notion "Rules and thresholds" | `test_notion_rules.py` | block parsing; valid override applies + notes; invalid ignored + noted; unknown key noted; validation-rejected reverted; `dry_run` from Notion; missing section / unreachable spine fall back silently |
 | Weekly spine reminder | `test_reminder.py` | created on/after `spine_review_day`; skipped if already open; `"off"` disables; before-day skip; once per week; reminder card protected from hygiene |
 | Report sections | `test_e2e.py::test_e2e_run_report_generated` | the five canonical section names appear in order |
+| In-scope archiving + precedence | `test_inscope_archive.py` | `[Owner: X]` is a deterministic archive candidate; an in-scope `[Owner: X]` card produces an archive action (not a date fix); borderline/flag-off → proposal; `max_inscope_archives_per_run` cap; merge-claimed cards skipped |
+| Stale-label three-way disposition | `test_execute.py` | swap when Active+Time-sensitive (LLM verdict), remove by default, archived card skipped (precedence) |
+| Label-neutral date fixes | `test_due.py::test_date_handler_is_label_neutral_on_clear/_redate` | clearing/re-dating never adds or removes a label |
+| Merge lines name every card | `test_report.py::test_merge_line_names_survivor_and_each_merged_away_card` | survivor + each merged-away card rendered with title+URL on indented sub-lines |
+| Spine workstream attributes | `test_spine.py` | `Priority` / `Time-sensitive` parsed from blocks and dicts, default Normal / No |
 
 ### 8. Recovery scope resolution (§5.2)
 

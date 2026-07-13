@@ -46,7 +46,14 @@ change to a behavioral default must update **both** `agent_config.json` and that
 Notion section (see CLAUDE.md). Recognized keys and coercion live in
 `spine.py::_OVERRIDE_TYPES` and cover every behavioral parameter below (the three
 `tier1_*` flags, `dry_run`, `recovery_batch_size`, `archive_list_days`,
-`proposal_timeout_days`, `spine_review_day`, caps, thresholds, and windows).
+`proposal_timeout_days`, `spine_review_day`, `max_inscope_archives_per_run`, other
+caps, thresholds, and windows).
+
+Two other spine sections feed judgment (not config): **Active Workstreams** lines
+may optionally carry `Priority: High/Normal/Low` and `Time-sensitive: Yes/No`
+attributes (defaults `Normal` / `No` when absent), used by the stale-"must do"
+label pass to decide swap-vs-remove; and the **Card naming standard** section
+guides renames.
 
 ---
 
@@ -98,6 +105,7 @@ enforced at startup unless noted.
 | `max_merges_per_run` | int | `10` | `>= 0` | Hard cap on merges executed per run. |
 | `max_renames_per_run` | int | `15` | `>= 0` | Hard cap on renames executed per run. When it binds, heuristic-flagged names take priority over LLM-nominated non-flagged renames (see `name_min_length`). |
 | `max_recoveries_per_run` | int | `15` | `>= 0` | Hard cap on recovery routings executed per run. |
+| `max_inscope_archives_per_run` | int | `10` | `>= 0` | Hard cap on in-scope "no longer needed" archivings executed per run (Today / Inbox / Triage / Next Few Days cards moved to the Agent Archive list). |
 | `max_proposals_open` | int | `20` | `>= 0` | Stop generating new Tier 2 proposals once this many are already open. |
 
 ### Automatic-mode toggles (shipped default is automatic)

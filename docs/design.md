@@ -53,7 +53,7 @@ No LLM calls in this phase. Facts are pre-computed and passed to the LLM as cons
 - **Hygiene candidates:** in-scope cards with overdue due dates (> `dead_due_days` past), stale time-based labels, or names failing simple quality heuristics (length, all-lowercase fragments, pipe-separated segments, known-typo patterns).
 
 ### Phase 3 — LLM Judgment (Sonnet, batched, prompt-cached)
-Four batched calls sharing a cached prefix (Notion spine + board summary + rules): cluster adjudication, hygiene (names/descriptions), **dead-due classification** (its own call with a per-card-scaled token budget so a large overdue set is never truncated), and recovery triage. Model: `claude-sonnet-4-6` primary, Ollama `qwen3:8b` fallback receiving the same unfiltered inputs.
+Batched calls sharing a cached prefix (Notion spine + board summary + rules): cluster adjudication, hygiene (names/descriptions), **dead-due classification** (its own call with a per-card-scaled token budget so a large overdue set is never truncated), **in-scope "no longer needed" archiving**, **stale-label disposition** (swap vs remove), and recovery triage. Model: `claude-sonnet-4-6` primary, Ollama `qwen3:8b` fallback receiving the same unfiltered inputs.
 
 1. **Cluster adjudication:** for each candidate cluster: `duplicate` / `related-but-distinct` / `unrelated`; pick the survivor (most context, most recent activity, best list position); compose merged name + consolidated description; assign confidence tier per the bounded rules in §4.
 2. **Hygiene pass:** cleaned names (typos fixed, verb-first where natural, person references preserved), description structuring, due-date clear/keep decisions, stale-label removals.
@@ -101,9 +101,13 @@ Deterministic floors/ceilings applied after the LLM's confidence call:
 
 ## 5. P0 Capabilities — Detail
 
-### 5.1 (a) Hygiene: due dates, labels, names, descriptions
-- **Dead due dates:** due dates more than `dead_due_days` (14) overdue are first **classified against the spine**. *Still-matters* (its workstream is Active, or the card text shows a task that still must happen) → **never touched**, listed under "Still overdue and possibly urgent" in the report. *No-longer-matters* → a new date is set **only if one is actually written** in the card text or as a workstream deadline on the spine (the LLM must cite the exact source substring, verified in Python; never guessed); otherwise the date is cleared. The old date is always preserved in a comment. Executed automatically per `tier1_due_date_clear` (borderline calls become proposals). Due dates within 14 days past are left alone.
-- **Stale time-based labels:** time-based labels on cards *not* in the matching list, where the label was applied > `optimistic_label_days` (7) ago, are removed automatically (Tier 1) per `tier1_stale_label_removal`, with an explanatory comment.
+### 5.1 (a) Hygiene: archiving, due dates, labels, names, descriptions
+
+**Per-card action precedence: merge > archive > date/label/title fixes.** A card being merged (any card in a duplicate cluster) or archived receives no other fix that run.
+
+- **In-scope archiving ("no longer needed"):** each run, in-scope cards (Today / Inbox/Triage / Next Few Days) are evaluated against the test — workstream marked Done (or Winding down) on the spine, an event/deadline passed with nothing left to do, or a card titled `[Owner: Name]` (the `[Owner:]` case is detected deterministically in Python; the rest by the LLM against the spine). Matches move to the TOP of the Agent Archive list, governed by `tier1_recovery_archive` + `auto_min_confidence` like all archives, capped at `max_inscope_archives_per_run` (10).
+- **Dead due dates:** due dates more than `dead_due_days` (14) overdue are first **classified against the spine** (its own LLM pass). *Still-matters* → **never touched**, listed under "Still overdue and possibly urgent". *No-longer-matters* → a new date is set **only if one is actually written** in the card text or as a spine workstream deadline (the LLM cites the exact substring, verified in Python; never guessed); otherwise the date is cleared. The old date is always preserved in a comment. Date fixes are **label-neutral** — they never add or remove a label. Executed automatically per `tier1_due_date_clear` (borderline → proposal).
+- **Stale time-based "must do" labels** (label applied > `optimistic_label_days` ago on a card not in the matching list) get a **three-way disposition**: (a) if the card meets the "no longer needed" test → archived (above); (b) if its workstream is **Active AND Time-sensitive** on the spine → the label is **swapped** to the matching tier (`2. Next Few Days (must do)` or `3. This Week (must do)`); (c) otherwise **removed**. The old label is always noted in a comment. Governed by `tier1_stale_label_removal` + `auto_min_confidence`. Swap decisions use the spine's per-workstream `Priority` / `Time-sensitive` attributes.
 - **Names:** typo correction, capitalization, verb-first phrasing where natural, person names preserved and moved to a consistent position (`Colin — inputs on RSM comp` style). Pipe-separated multi-part names keep the primary action as the title; remaining segments become description bullets (no card splitting in P0). Original title always preserved in description.
 - **Descriptions:** light structuring only — never delete content. If a merge or rename adds material, it is organized under `Original title`, `Context`, and per-source sections.
 - One-time manual setup fix (not agent work): merge the two duplicate `Logan` labels.
@@ -122,7 +126,7 @@ Deterministic floors/ceilings applied after the LLM's confidence call:
 
 ## 6. Guardrails (enforced in Python, not the LLM)
 
-- Per-run caps: `max_merges_per_run` (10), `max_renames_per_run` (15), `max_recoveries_per_run` (15), `max_proposals_open` (20 — stop generating Tier 2 proposals when 20 are already open).
+- Per-run caps: `max_merges_per_run` (10), `max_renames_per_run` (15), `max_recoveries_per_run` (15), `max_inscope_archives_per_run` (10), `max_proposals_open` (20 — stop generating Tier 2 proposals when 20 are already open).
 - Never touch: the Grooming Report card, any card edited by Vijay in the last 12 hours, any card with an open `Agent: Proposed` decision, anything outside scope definitions.
 - Merge invariant: survivor description must contain every source card's original name and description text (validated string-containment check before the losing card moves to quarantine).
 - LLM-generated names validated against source data (no invented people/entities not present in the source cards or spine).
@@ -142,7 +146,7 @@ Deterministic floors/ceilings applied after the LLM's confidence call:
 
 ### 7.2 Notion context spine
 **Created:** `Trello Grooming Agent Spine` (private workspace page, page ID `3966c55b25638155a69dfdb1421d5d3e`), read at run start, human-edited in P0. Sections:
-- **Active Workstreams:** name, status (Active / Winding down / Done / Paused), one-line context. Seeded from the 2026-07-06 board: Sales Summit (Done, wrap-up only), AdmitHub rollout, Adaptive Connect, comp plans (RSM/AE), Q3 objectives and forecasts, intake escalations, Forge, weekend referral strategy (Ty), sales collateral/Sales Hub, hiring and onboarding, agents and knowledge systems.
+- **Active Workstreams:** name, status (Active / Winding down / Done / Paused), one-line context, and optional `Priority: High/Normal/Low` and `Time-sensitive: Yes/No` attributes (default Normal / No) used by the stale-label swap decision. Seeded from the 2026-07-06 board: Sales Summit (Done, wrap-up only), AdmitHub rollout, Adaptive Connect, comp plans (RSM/AE), Q3 objectives and forecasts, intake escalations, Forge, weekend referral strategy (Ty), sales collateral/Sales Hub, hiring and onboarding, agents and knowledge systems.
 - **People:** name, role, relationship to Vijay's work. Roles are inferred from the board and flagged for correction.
 - **Notes for the agent:** standing interpretation rules (Done-workstream cards are archive candidates, unknown-context cards default to Inbox / Triage routing).
 - **Card naming standard:** free-text rules the rename pass must follow (falls back to hardcoded rules if the section is absent).

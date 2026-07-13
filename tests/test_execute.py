@@ -157,11 +157,12 @@ def test_rename_carries_change_comment_with_confidence(board, settings, db_path,
 # ── Stale time-based label auto-removal (auto-mode default) ─────────────────
 
 def test_stale_label_auto_removed_tier1(board, settings, db_path, now_utc):
+    # No LLM label verdict → default disposition is remove (three-way (c)).
     card = board.card_by_id("stale_label")
     mut = _mut()
     result = ex.ExecutionResult()
-    tier2 = ex.execute_stale_labels(db_path, mut, board, [(card, "1. Today (must do)")],
-                                    settings, now_utc, NOW_ISO, result)
+    tier2 = ex.execute_label_dispositions(db_path, mut, board, [(card, "1. Today (must do)")],
+                                          [], settings, now_utc, NOW_ISO, result)
     assert tier2 == []
     stripped = [e for e in _ops(mut, "set_labels") if e["card_id"] == "stale_label"]
     assert stripped and "LB_t" not in stripped[0]["label_ids"]
@@ -173,10 +174,37 @@ def test_stale_label_proposed_when_flag_off(board, make_settings, db_path, now_u
     card = board.card_by_id("stale_label")
     mut = _mut()
     result = ex.ExecutionResult()
-    tier2 = ex.execute_stale_labels(db_path, mut, board, [(card, "1. Today (must do)")],
-                                    settings, now_utc, NOW_ISO, result)
+    tier2 = ex.execute_label_dispositions(db_path, mut, board, [(card, "1. Today (must do)")],
+                                          [], settings, now_utc, NOW_ISO, result)
     assert any(a["type"] == "stale_label_removal" for a in tier2)
     assert _ops(mut, "set_labels") == []
+
+
+def test_stale_label_swapped_when_active_time_sensitive(board, settings, db_path, now_utc):
+    # LLM disposition "swap" → move to the target tier, not remove.
+    card = board.card_by_id("stale_label")
+    mut = _mut()
+    result = ex.ExecutionResult()
+    verdicts = [{"card_id": "stale_label", "disposition": "swap",
+                 "target_label": "2. Next Few Days (must do)", "confidence": 85,
+                 "reason": "Workstream active & time-sensitive"}]
+    tier2 = ex.execute_label_dispositions(db_path, mut, board, [(card, "1. Today (must do)")],
+                                          verdicts, settings, now_utc, NOW_ISO, result)
+    stripped = [e for e in _ops(mut, "set_labels") if e["card_id"] == "stale_label"]
+    assert stripped and "LB_t" not in stripped[0]["label_ids"] and "LB_n" in stripped[0]["label_ids"]
+    assert any(a["type"] == "label_swap" for a in result.applied)
+    assert any("Swapped stale label" in e["text"] for e in _ops(mut, "add_comment"))
+
+
+def test_stale_label_archived_card_skipped(board, settings, db_path, now_utc):
+    # A stale-label card already claimed by archive gets no label change (precedence).
+    card = board.card_by_id("stale_label")
+    mut = _mut()
+    result = ex.ExecutionResult()
+    tier2 = ex.execute_label_dispositions(db_path, mut, board, [(card, "1. Today (must do)")],
+                                          [], settings, now_utc, NOW_ISO, result,
+                                          skip_ids={"stale_label"})
+    assert _ops(mut, "set_labels") == [] and tier2 == []
 
 
 # ── Proposals: rejection ledger + cap ──────────────────────────────────────

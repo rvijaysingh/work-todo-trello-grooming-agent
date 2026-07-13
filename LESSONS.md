@@ -2,6 +2,36 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Obsolete in-scope cards were date-fixed instead of archived
+- **Symptom:** a dry-run queued four "[Owner: Marah/Matt/Hunter]" cards for
+  due-date fixes. Those are delegated/handed-off items — archive candidates — so
+  spending a date fix on them is wrong and leaves the board cluttered.
+- **Root cause:** the "no longer needed" archive test ran only on the recovery
+  batch (Scratch lists), never on in-scope lists, so obsolete in-scope cards fell
+  through to the date/label passes.
+- **Fix:** in-scope cards are now evaluated against the test each run — `[Owner:]`
+  titles deterministically (`guardrails.is_owner_titled`) plus an LLM pass for
+  Done-workstream / passed-deadline cards — and matches are archived (governed by
+  `tier1_recovery_archive` + `auto_min_confidence`, capped by
+  `max_inscope_archives_per_run`). A strict per-card precedence (merge > archive >
+  date/label/title) means a merged/archived card gets no other fix that run.
+  Regression: `test_inscope_archive.py::test_inscope_owner_card_archived_not_date_fixed`.
+
+## Date fixes were not label-neutral
+- **Root cause:** the dead-due handler added the `Agent: Auto-Updated` label when
+  clearing/re-dating a due date, coupling a date change to a label change.
+- **Fix:** date fixes now touch only the due date (old date noted in a comment)
+  and never add or remove a label. Regression:
+  `test_due.py::test_date_handler_is_label_neutral_on_clear`.
+
+## Stale "must do" labels were removal-only
+- **Root cause:** a stale time-based label was always removed, even when its
+  workstream was still active and time-sensitive — losing a legitimate signal.
+- **Fix:** three-way disposition — archive (if no longer needed), swap to the
+  matching tier (`2. Next Few Days` / `3. This Week`) when the workstream is
+  Active AND Time-sensitive on the spine, else remove. Requires new spine
+  `Priority` / `Time-sensitive` workstream attributes (default Normal / No).
+
 ## Pre-fix dry-runs contaminated the diff → phantom "rejections" at go-live
 - **Symptom:** a clean dry-run reported "Rejections detected this run: 4" even
   though no live agent action had ever happened, so there was nothing to reject.

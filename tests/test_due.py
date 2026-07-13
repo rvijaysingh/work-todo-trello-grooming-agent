@@ -71,6 +71,25 @@ def test_redate_rejected_when_source_absent_falls_back_to_clear(board, settings,
     assert any(e["card_id"] == "dead_due" for e in _ops(mut, "clear_due"))
 
 
+def test_date_handler_is_label_neutral_on_clear(board, settings, db_path, now_utc):
+    # Item 3: a due-date fix must never add or remove labels.
+    mut, result, tier2 = _run(board, settings, db_path, now_utc,
+                              [{"card_id": "dead_due", "due_status": "no_longer_matters",
+                                "confidence": 90}])
+    assert any(e["card_id"] == "dead_due" for e in _ops(mut, "clear_due"))
+    assert _ops(mut, "set_labels") == []  # no label added/removed
+
+
+def test_date_handler_is_label_neutral_on_redate(board, settings, db_path, now_utc):
+    mut, result, tier2 = _run(board, settings, db_path, now_utc,
+                              [{"card_id": "dead_due", "due_status": "no_longer_matters",
+                                "new_due": "2026-08-15T00:00:00.000Z", "new_due_source": "2026-08-15",
+                                "confidence": 90}],
+                              spine_terms=["Payer deadline 2026-08-15"])
+    assert any(e["card_id"] == "dead_due" for e in _ops(mut, "set_due"))
+    assert _ops(mut, "set_labels") == []
+
+
 def test_borderline_due_becomes_proposal(board, settings, db_path, now_utc):
     mut, result, tier2 = _run(board, settings, db_path, now_utc,
                               [{"card_id": "dead_due", "due_status": "no_longer_matters",

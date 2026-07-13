@@ -69,6 +69,20 @@ def test_done_automatically_uses_titles_not_bare_ids(board, settings):
     assert "http://trello/pipe" in text
 
 
+def test_merge_line_names_survivor_and_each_merged_away_card(board, settings):
+    # Item 1: merge report must name survivor + every merged-away card w/ title+URL.
+    result = ex.ExecutionResult()
+    result.applied.append({"type": "merge", "survivor_id": "dup_exact_b",
+                           "loser_ids": ["dup_exact_a", "dup_near_a"]})
+    text = _build(result, board, settings, dry_run=False)
+    assert "http://trello/exactb" in text          # survivor url
+    assert "merged away:" in text
+    assert "http://trello/exacta" in text           # loser 1 url
+    assert "http://trello/neara" in text            # loser 2 url
+    # two indented sub-lines, one per merged-away card
+    assert text.count("      merged away:") == 2
+
+
 def test_live_report_uses_past_tense_not_would(board, settings):
     result = ex.ExecutionResult()
     result.applied.append({"type": "rename", "card_id": "name_pipe", "new_name": "Call Dana"})

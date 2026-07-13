@@ -75,6 +75,18 @@ _SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS archive_ledger (
+        card_id TEXT PRIMARY KEY,
+        entered_ts TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS kv (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS run_state (
         id INTEGER PRIMARY KEY CHECK(id = 1),
         consecutive_failures INTEGER NOT NULL DEFAULT 0,
@@ -274,6 +286,54 @@ def processed_recovery_ids(db_path: str) -> set[str]:
     with db_connection(db_path) as conn:
         rows = conn.execute("SELECT card_id FROM recovery_ledger").fetchall()
     return {r["card_id"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Archive ledger — entry timestamps for cards parked in the Agent Archive list
+# ---------------------------------------------------------------------------
+
+def add_archive_entry(db_path: str, card_id: str, entered_ts: str) -> None:
+    """Record (or refresh) when a card entered the Agent Archive list.
+
+    INSERT OR IGNORE so a card already tracked keeps its original entry time —
+    the 60-day Trello-archive clock starts when the card first lands there.
+    """
+    with db_connection(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO archive_ledger (card_id, entered_ts) VALUES (?, ?)",
+            (card_id, entered_ts),
+        )
+
+
+def archive_entry_ts(db_path: str, card_id: str) -> str | None:
+    with db_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT entered_ts FROM archive_ledger WHERE card_id = ?", (card_id,)
+        ).fetchone()
+    return row["entered_ts"] if row else None
+
+
+def remove_archive_entry(db_path: str, card_id: str) -> None:
+    """Drop a card from the archive ledger (Trello-archived, or pulled back out)."""
+    with db_connection(db_path) as conn:
+        conn.execute("DELETE FROM archive_ledger WHERE card_id = ?", (card_id,))
+
+
+# ---------------------------------------------------------------------------
+# Key/value scratch state (e.g. last week the spine-review reminder was created)
+# ---------------------------------------------------------------------------
+
+def kv_get(db_path: str, key: str) -> str | None:
+    with db_connection(db_path) as conn:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def kv_set(db_path: str, key: str, value: str) -> None:
+    with db_connection(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, value)
+        )
 
 
 # ---------------------------------------------------------------------------

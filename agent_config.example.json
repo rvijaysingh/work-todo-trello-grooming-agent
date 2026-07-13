@@ -5,19 +5,19 @@
   "recovery_include_pattern": "^Scratch",
   "recovery_exclude_pattern": "^ARCHIVE",
 
-  "quarantine_list": "Agent: Merged/Removed",
+  "archive_list_name": "Agent Archive",
   "report_list": "Today",
   "labels": {
     "auto_updated": "Agent: Auto-Updated",
     "proposed": "Agent: Proposed"
   },
 
-  "recovery_batch_size": 15,
+  "recovery_batch_size": 2,
   "recovery_today_max": 3,
 
-  "quarantine_days": 7,
-  "proposal_timeout_days": 7,
-  "no_touch_hours": 12,
+  "archive_list_days": 60,
+  "proposal_timeout_days": 14,
+  "no_touch_hours": 0,
   "dead_due_days": 14,
   "optimistic_label_days": 7,
 
@@ -26,8 +26,10 @@
   "max_recoveries_per_run": 15,
   "max_proposals_open": 20,
 
-  "tier1_stale_label_removal": false,
-  "tier1_recovery_archive": false,
+  "tier1_stale_label_removal": true,
+  "tier1_recovery_archive": true,
+  "tier1_due_date_clear": true,
+  "auto_min_confidence": 70,
 
   "wide_block_jaccard": 0.5,
   "narrow_hint_jaccard": 0.4,
@@ -38,6 +40,7 @@
   "model": "claude-sonnet-4-6",
   "ollama_model": "qwen3:8b",
   "weekly_sweep_day": "sunday",
+  "spine_review_day": "monday",
 
   "dry_run": true,
   "auto_pause_after_failures": 3,

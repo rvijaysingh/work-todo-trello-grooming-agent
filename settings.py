@@ -46,13 +46,13 @@ class AgentSettings:
     comparison_extra_lists: list[str]
     recovery_include_pattern: str
     recovery_exclude_pattern: str
-    quarantine_list: str
+    archive_list_name: str
     report_list: str
     label_auto_updated: str
     label_proposed: str
     recovery_batch_size: int
     recovery_today_max: int
-    quarantine_days: int
+    archive_list_days: int
     proposal_timeout_days: int
     no_touch_hours: int
     dead_due_days: int
@@ -63,6 +63,8 @@ class AgentSettings:
     max_proposals_open: int
     tier1_stale_label_removal: bool
     tier1_recovery_archive: bool
+    tier1_due_date_clear: bool
+    auto_min_confidence: int
     wide_block_jaccard: float
     narrow_hint_jaccard: float
     name_min_length: int
@@ -70,6 +72,7 @@ class AgentSettings:
     model: str
     ollama_model: str
     weekly_sweep_day: str
+    spine_review_day: str
     dry_run: bool
     auto_pause_after_failures: int
     spine_page_id: str
@@ -148,13 +151,13 @@ def load_settings(agent_config_path: str) -> AgentSettings:
             comparison_extra_lists=list(req("comparison_extra_lists")),
             recovery_include_pattern=str(req("recovery_include_pattern")),
             recovery_exclude_pattern=str(req("recovery_exclude_pattern")),
-            quarantine_list=str(req("quarantine_list")),
+            archive_list_name=str(req("archive_list_name")),
             report_list=str(req("report_list")),
             label_auto_updated=str(labels["auto_updated"]),
             label_proposed=str(labels["proposed"]),
             recovery_batch_size=int(req("recovery_batch_size")),
             recovery_today_max=int(req("recovery_today_max")),
-            quarantine_days=int(req("quarantine_days")),
+            archive_list_days=int(req("archive_list_days")),
             proposal_timeout_days=int(req("proposal_timeout_days")),
             no_touch_hours=int(req("no_touch_hours")),
             dead_due_days=int(req("dead_due_days")),
@@ -165,6 +168,8 @@ def load_settings(agent_config_path: str) -> AgentSettings:
             max_proposals_open=int(req("max_proposals_open")),
             tier1_stale_label_removal=bool(req("tier1_stale_label_removal")),
             tier1_recovery_archive=bool(req("tier1_recovery_archive")),
+            tier1_due_date_clear=bool(req("tier1_due_date_clear")),
+            auto_min_confidence=int(req("auto_min_confidence")),
             wide_block_jaccard=float(req("wide_block_jaccard")),
             narrow_hint_jaccard=float(req("narrow_hint_jaccard")),
             name_min_length=int(req("name_min_length")),
@@ -172,6 +177,7 @@ def load_settings(agent_config_path: str) -> AgentSettings:
             model=str(req("model")),
             ollama_model=str(req("ollama_model")),
             weekly_sweep_day=str(req("weekly_sweep_day")).lower(),
+            spine_review_day=str(req("spine_review_day")).lower(),
             dry_run=bool(req("dry_run")),
             auto_pause_after_failures=int(req("auto_pause_after_failures")),
             spine_page_id=str(req("spine_page_id")),
@@ -194,10 +200,15 @@ def _validate_settings(s: AgentSettings) -> None:
     """Cross-field and range validation per docs/config.md."""
     if not s.edit_scope_lists:
         raise SettingsError("edit_scope_lists must be non-empty")
-    if s.recovery_today_max > s.recovery_batch_size:
-        raise SettingsError("recovery_today_max must be <= recovery_batch_size")
+    if not s.archive_list_name:
+        raise SettingsError("archive_list_name must be non-empty")
+    # NOTE: recovery_today_max is intentionally NOT bounded by recovery_batch_size.
+    # Per docs/design.md it may exceed the batch (harmless — a small batch simply
+    # never reaches the Today cap in one run).
     if not (s.name_min_length < s.name_max_length):
         raise SettingsError("name_min_length must be < name_max_length")
+    if not (0 <= s.auto_min_confidence <= 100):
+        raise SettingsError("auto_min_confidence must satisfy 0 <= x <= 100")
     for field_name, val in (
         ("narrow_hint_jaccard", s.narrow_hint_jaccard),
         ("wide_block_jaccard", s.wide_block_jaccard),
@@ -206,16 +217,18 @@ def _validate_settings(s: AgentSettings) -> None:
             raise SettingsError(f"{field_name} must satisfy 0.0 < x <= 1.0")
     for field_name, val in (
         ("recovery_batch_size", s.recovery_batch_size),
-        ("quarantine_days", s.quarantine_days),
+        ("archive_list_days", s.archive_list_days),
         ("proposal_timeout_days", s.proposal_timeout_days),
-        ("no_touch_hours", s.no_touch_hours),
         ("dead_due_days", s.dead_due_days),
         ("optimistic_label_days", s.optimistic_label_days),
         ("auto_pause_after_failures", s.auto_pause_after_failures),
     ):
         if val <= 0:
             raise SettingsError(f"{field_name} must be > 0")
+    # no_touch_hours may be 0 (disables the no-touch window; the rejection ledger
+    # and open-proposal lock still protect their cards).
     for field_name, val in (
+        ("no_touch_hours", s.no_touch_hours),
         ("recovery_today_max", s.recovery_today_max),
         ("max_merges_per_run", s.max_merges_per_run),
         ("max_renames_per_run", s.max_renames_per_run),
@@ -226,6 +239,8 @@ def _validate_settings(s: AgentSettings) -> None:
             raise SettingsError(f"{field_name} must be >= 0")
     if s.weekly_sweep_day not in _WEEKDAYS:
         raise SettingsError(f"weekly_sweep_day must be one of {_WEEKDAYS}")
+    if s.spine_review_day not in _WEEKDAYS and s.spine_review_day != "off":
+        raise SettingsError(f"spine_review_day must be one of {_WEEKDAYS} or 'off'")
     for field_name, pattern in (
         ("recovery_include_pattern", s.recovery_include_pattern),
         ("recovery_exclude_pattern", s.recovery_exclude_pattern),

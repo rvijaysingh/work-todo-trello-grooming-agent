@@ -11,7 +11,7 @@ NOW_ISO = "2026-07-11T13:00:00+00:00"
 
 
 def _mut():
-    return ex.BoardMutator(MagicMock(), dry_run=True)
+    return ex.BoardMutator(MagicMock(), dry_run=False)
 
 
 def _ops(mut, op):
@@ -105,8 +105,9 @@ def test_recovery_archive_auto_when_confident(board, settings, db_path):
                and e.get("position") == "top" for e in _ops(mut, "move_card"))
     assert storage.archive_entry_ts(db_path, "rec_s71_1") == NOW_ISO
     assert any(a["card_id"] == "rec_s71_1" for a in result.recently_archived)
-    # Wording is archive-not-deletion.
-    assert any(ex.ARCHIVE_MOVED_WORDING in e["text"] for e in _ops(mut, "add_comment"))
+    # Wording: moved into the Agent Archive list (not deletion, not yet Trello-archived).
+    assert any(ex.archive_list_wording(settings) in e["text"] for e in _ops(mut, "add_comment"))
+    assert any("Agent Archive list" in a["note"] for a in result.recently_archived)
 
 
 def test_recovery_archive_borderline_proposed(board, settings, db_path):
@@ -135,3 +136,28 @@ def test_recovery_respects_max_recoveries_cap(board, make_settings, db_path):
                 {"card_id": "rec_s71_2", "disposition": "inbox"}]
     mut, result, _ = _run_recovery(board, settings, db_path, verdicts)
     assert result.counters["recoveries"] == 1
+
+
+def test_recovery_routing_appears_in_applied_for_report(board, settings, db_path):
+    # Regression (issue 4): executed recoveries must land in result.applied so the
+    # report's "Done automatically" section actually shows them.
+    mut, result, _ = _run_recovery(board, settings, db_path,
+                                   [{"card_id": "rec_s71_1", "disposition": "inbox"}])
+    routes = [a for a in result.applied if a["type"] == "recovery_route"]
+    assert routes and routes[0]["card_id"] == "rec_s71_1"
+    assert routes[0]["dest"] == "Inbox / Triage"
+
+
+def test_recovery_batch_defaults_undisposed_cards_to_inbox(board, settings):
+    # Regression (issue 4): a non-empty batch never silently produces zero
+    # dispositions — cards the LLM omitted default to Inbox / Triage.
+    from main import _default_recovery
+    batch = cand.recovery_batch(board, settings, set())
+    assert batch, "fixture must have scratch cards"
+    # LLM returned a disposition for only the first card.
+    verdicts = [{"card_id": batch[0].id, "disposition": "today"}]
+    filled = _default_recovery(verdicts, batch)
+    filled_ids = {v["card_id"] for v in filled}
+    assert {c.id for c in batch} <= filled_ids
+    defaulted = [v for v in filled if v["card_id"] == batch[-1].id]
+    assert defaulted and defaulted[0]["disposition"] == "inbox"

@@ -9,7 +9,7 @@ NOW_ISO = "2026-07-11T13:00:00+00:00"  # a Saturday
 
 
 def _mut():
-    return ex.BoardMutator(MagicMock(), dry_run=True)
+    return ex.BoardMutator(MagicMock(), dry_run=False)
 
 
 def _ops(mut, op):

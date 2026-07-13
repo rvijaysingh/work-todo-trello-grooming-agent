@@ -9,7 +9,7 @@ from phases import execute as ex
 NOW_ISO = "2026-07-11T13:00:00+00:00"
 
 
-def _mut(dry=True):
+def _mut(dry=False):
     return ex.BoardMutator(MagicMock(), dry_run=dry)
 
 

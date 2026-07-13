@@ -79,6 +79,25 @@ def test_borderline_due_becomes_proposal(board, settings, db_path, now_utc):
     assert any(a["type"] == "dead_due_clear" for a in tier2)
 
 
+def test_overdue_card_never_silently_dropped(board, settings, db_path, now_utc):
+    # Regression (issue 5): an overdue in-scope dead-due card the LLM did NOT
+    # classify must still surface as an escalation — never nothing.
+    mut, result, tier2 = _run(board, settings, db_path, now_utc, verdicts=[])  # no verdicts at all
+    assert any(s["card_id"] == "dead_due" for s in result.still_overdue)
+    assert _ops(mut, "clear_due") == [] and _ops(mut, "set_due") == []
+
+
+def test_every_dead_due_produces_escalation_or_fix(board, settings, db_path, now_utc):
+    # Each dead-due card resolves to exactly one of: escalation (still_overdue) or
+    # a fix (clear/redate action). Mix a still-matters and a no-longer-matters.
+    verdicts = [{"card_id": "dead_due", "due_status": "no_longer_matters", "confidence": 90}]
+    mut, result, tier2 = _run(board, settings, db_path, now_utc, verdicts)
+    escalated = {s["card_id"] for s in result.still_overdue}
+    fixed = {a["card_id"] for a in result.applied if a["type"] in ("dead_due_clear", "due_redate")}
+    proposed = {a["card_ids"][0] for a in tier2}
+    assert "dead_due" in (escalated | fixed | proposed)
+
+
 def test_due_proposed_when_flag_off(board, make_settings, db_path, now_utc):
     settings = make_settings(tier1_due_date_clear=False)
     mut, result, tier2 = _run(board, settings, db_path, now_utc,

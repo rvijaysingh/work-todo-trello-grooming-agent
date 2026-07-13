@@ -10,7 +10,7 @@ from phases import execute as ex
 from phases import snapshot_diff as sd
 
 
-def _mut(dry=True):
+def _mut(dry=False):
     return ex.BoardMutator(MagicMock(), dry_run=dry)
 
 

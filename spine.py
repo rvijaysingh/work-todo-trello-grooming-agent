@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 _SECTION_ALIASES = {
     "active workstreams": "workstreams",
+    "complete or inactive workstreams": "workstreams",
+    "complete/inactive workstreams": "workstreams",
+    "inactive workstreams": "workstreams",
     "workstreams": "workstreams",
     "people": "people",
     "notes for the agent": "notes",
@@ -34,6 +37,11 @@ _SECTION_ALIASES = {
     "naming standard": "naming",
 }
 
+# Statuses that mean a workstream is finished (the "no longer needed" test treats
+# its cards as archive candidates). "Complete"/"Completed" is the live page's
+# wording; "Done"/"Winding down" are the older bullet-format values.
+_DONE_STATUSES = frozenset({"done", "winding down", "complete", "completed"})
+
 
 @dataclass
 class Workstream:
@@ -41,7 +49,8 @@ class Workstream:
     status: str = ""
     context: str = ""
     priority: str = "Normal"        # High / Normal / Low (default Normal)
-    time_sensitive: bool = False    # from "Time-sensitive: Yes/No" (default No)
+    time_sensitive: bool = False    # from the graded "Time Sensitivity" column /
+                                    # "Time-sensitive:" attr; High/Medium => True
 
 
 @dataclass
@@ -86,7 +95,7 @@ class SpineData:
         return None
 
     def done_workstream_names(self) -> list[str]:
-        return [w.name for w in self.workstreams if w.status.lower() in ("done", "winding down")]
+        return [w.name for w in self.workstreams if w.status.lower() in _DONE_STATUSES]
 
     def all_terms(self) -> list[str]:
         """Every spine text fragment, for LLM-name grounding."""
@@ -107,7 +116,7 @@ def load_spine_from_dict(d: dict) -> SpineData:
             status=str(w.get("status", "")),
             context=str(w.get("context", "")),
             priority=str(w.get("priority", "Normal")) or "Normal",
-            time_sensitive=_as_bool(w.get("time_sensitive", False)),
+            time_sensitive=_time_sensitive_to_bool(w.get("time_sensitive", False)),
         )
         for w in d.get("workstreams", [])
     ]
@@ -144,6 +153,42 @@ def _as_bool(v) -> bool:
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in ("yes", "true", "1", "on")
+
+
+# --- Formatting / graded-value helpers (Notion native-table cells) ----------
+
+import re
+
+# Cells may arrive wrapped in inline markup (e.g. a color span:
+# '<span style="color:red">High</span>'). Strip any tags before parsing.
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_markup(text: str) -> str:
+    """Remove inline HTML-style tags (color spans etc.), keeping the inner text."""
+    return _TAG_RE.sub("", text or "")
+
+
+# Graded "Time Sensitivity" column. Higher rank == more time-sensitive; a range
+# like "Medium to High" resolves to its highest grade. "Yes" is tolerated (==High).
+_TS_RANK = {"no": 0, "low": 1, "medium": 2, "high": 3, "yes": 3}
+_TS_WORD_RE = re.compile(r"\b(high|medium|low|no|yes)\b", re.IGNORECASE)
+
+
+def _time_sensitive_to_bool(raw) -> bool:
+    """Map a graded Time Sensitivity value to the time_sensitive flag.
+
+    High/Medium (or Yes) => True; Low/No => False. Ranges ("Medium to High")
+    take the highest grade present. Markup is stripped first. Values with no
+    recognizable grade word fall back to yes/true/1/on parsing.
+    """
+    if isinstance(raw, bool):
+        return raw
+    text = _strip_markup(str(raw or "")).lower()
+    words = _TS_WORD_RE.findall(text)
+    if not words:
+        return _as_bool(raw)
+    return max(_TS_RANK[w] for w in words) >= 2  # Medium or High
 
 
 _ATTR_RE = None  # compiled lazily below
@@ -195,36 +240,171 @@ def _split_entry(text: str) -> tuple[str, str, str]:
     return name.strip(), "", ""
 
 
-def parse_spine_blocks(blocks: list[dict]) -> SpineData:
-    """Parse Notion block dicts into SpineData by section heading."""
-    spine = SpineData()
-    section = None
+# Block types that carry a section heading. Notion headings can be toggleable
+# (children hang off the heading); plain toggles serve the same role on the live
+# page ("Active Workstreams" / "Complete or Inactive Workstreams" toggles).
+_HEADING_TYPES = ("heading_1", "heading_2", "heading_3")
+_LIST_TYPES = ("bulleted_list_item", "numbered_list_item", "paragraph")
+
+
+def _block_children(block: dict) -> list[dict]:
+    """Return a block's child blocks, whether nested under the type payload or
+    hydrated onto a top-level 'children' key (see _hydrate_children)."""
+    btype = block.get("type", "")
+    payload = block.get(btype, {})
+    kids = payload.get("children") if isinstance(payload, dict) else None
+    if not kids:
+        kids = block.get("children")
+    return kids or []
+
+
+def _cell_text(cell) -> str:
+    """Plain text of one native-table cell (a rich_text array), markup stripped."""
+    if not isinstance(cell, list):
+        return ""
+    raw = "".join(rt.get("plain_text", "") for rt in cell if isinstance(rt, dict))
+    return _strip_markup(raw).strip()
+
+
+def _row_cells_text(row: dict) -> list[str]:
+    cells = row.get("table_row", {}).get("cells", []) if isinstance(row, dict) else []
+    return [_cell_text(c) for c in cells]
+
+
+def _header_key(text: str) -> str | None:
+    """Map a table header cell to a canonical workstream column key."""
+    t = _strip_markup(text or "").strip().lower()
+    if not t:
+        return None
+    if t == "name" or "workstream" in t:
+        return "name"
+    if "status" in t:
+        return "status"
+    if "time" in t and "sens" in t:
+        return "time"
+    if "priorit" in t:
+        return "priority"
+    if "context" in t:
+        return "context"
+    return None
+
+
+def _map_header(cells: list[str]) -> dict[str, int]:
+    col: dict[str, int] = {}
+    for i, c in enumerate(cells):
+        key = _header_key(c)
+        if key and key not in col:
+            col[key] = i
+    return col
+
+
+def _cell_at(cells: list[str], idx) -> str:
+    if idx is None or not (0 <= idx < len(cells)):
+        return ""
+    return cells[idx]
+
+
+def _parse_workstream_table(rows: list[dict], spine: SpineData) -> None:
+    """Parse a Notion native table's rows into Workstream entries.
+
+    The first row is treated as a header when its cells name known columns
+    (Name/Workstream, Status, Time Sensitivity, Context, Priority); otherwise a
+    positional layout (name, status, time-sensitivity, context) is assumed.
+    Empty Context cells are valid; rows with no name are skipped.
+    """
+    rows = [r for r in rows if isinstance(r, dict) and r.get("type") == "table_row"]
+    if not rows:
+        return
+    col = {"name": 0, "status": 1, "time": 2, "context": 3}  # positional default
+    data_rows = rows
+    header = _map_header(_row_cells_text(rows[0]))
+    if "name" in header:  # a recognizable header row — use it and skip it
+        col = header
+        data_rows = rows[1:]
+    for row in data_rows:
+        cells = _row_cells_text(row)
+        name = _cell_at(cells, col.get("name"))
+        if not name:
+            continue
+        priority = _cell_at(cells, col.get("priority")) or "Normal"
+        spine.workstreams.append(Workstream(
+            name=name,
+            status=_cell_at(cells, col.get("status")),
+            context=_cell_at(cells, col.get("context")),
+            priority=priority.capitalize(),
+            time_sensitive=_time_sensitive_to_bool(_cell_at(cells, col.get("time"))),
+        ))
+
+
+def _consume_line(section: str | None, text: str, spine: SpineData) -> None:
+    """Handle one list/paragraph line under the current section (bullet format)."""
+    if section == "workstreams":
+        name, status, context = _split_entry(text)
+        priority, time_sensitive, context = _parse_workstream_attrs(context)
+        spine.workstreams.append(Workstream(
+            name=name, status=status, context=context,
+            priority=priority, time_sensitive=time_sensitive))
+    elif section == "people":
+        name, role, context = _split_entry(text)
+        spine.people.append(Person(name=name, role=role, context=context))
+    elif section == "notes":
+        spine.notes.append(text)
+    elif section == "rules":
+        key, value = _parse_rule_line(text)
+        if key:
+            spine.rules[key] = value
+    elif section == "naming":
+        spine.naming_standard.append(text)
+
+
+def _walk_blocks(blocks: list[dict], spine: SpineData, section: str | None) -> None:
+    """Recursively parse blocks, carrying the current section into children.
+
+    Supports both the flat heading+bullet format and the live page's toggle +
+    native-table format. A heading updates the section for its following siblings
+    (and its own children when toggleable); a toggle scopes the section to its
+    children only; a table under the workstreams section is parsed as workstreams.
+    """
     for block in blocks:
         btype = block.get("type", "")
         text = _plain_text(block)
-        if not text:
-            continue
-        if btype.startswith("heading"):
-            section = _SECTION_ALIASES.get(text.lower())
-            continue
-        if btype in ("bulleted_list_item", "numbered_list_item", "paragraph"):
+        children = _block_children(block)
+
+        if btype == "table":
             if section == "workstreams":
-                name, status, context = _split_entry(text)
-                priority, time_sensitive, context = _parse_workstream_attrs(context)
-                spine.workstreams.append(Workstream(
-                    name=name, status=status, context=context,
-                    priority=priority, time_sensitive=time_sensitive))
-            elif section == "people":
-                name, role, context = _split_entry(text)
-                spine.people.append(Person(name=name, role=role, context=context))
-            elif section == "notes":
-                spine.notes.append(text)
-            elif section == "rules":
-                key, value = _parse_rule_line(text)
-                if key:
-                    spine.rules[key] = value
-            elif section == "naming":
-                spine.naming_standard.append(text)
+                _parse_workstream_table(children, spine)
+            continue
+
+        if btype == "toggle":
+            mapped = _SECTION_ALIASES.get(text.lower()) if text else None
+            child_section = mapped if mapped is not None else section
+            if children:
+                _walk_blocks(children, spine, child_section)
+            continue
+
+        if btype in _HEADING_TYPES:
+            if text:
+                section = _SECTION_ALIASES.get(text.lower())
+            if children:  # toggleable heading — its content hangs off it
+                _walk_blocks(children, spine, section)
+            continue
+
+        if btype in _LIST_TYPES:
+            if text:
+                _consume_line(section, text, spine)
+            if children:
+                _walk_blocks(children, spine, section)
+            continue
+
+        # Structural wrappers (column_list, synced_block, etc.) — descend.
+        if children:
+            _walk_blocks(children, spine, section)
+
+
+def parse_spine_blocks(blocks: list[dict]) -> SpineData:
+    """Parse Notion block dicts into SpineData by section heading/toggle."""
+    spine = SpineData()
+    _walk_blocks(blocks, spine, None)
     return spine
 
 
@@ -241,6 +421,31 @@ def _parse_rule_line(text: str) -> tuple[str, str]:
     return left.strip().lower(), right.strip()
 
 
+def _hydrate_children(notion_client, blocks: list[dict], depth: int = 0) -> list[dict]:
+    """Recursively fetch and embed children for blocks that have them.
+
+    The Notion blocks API returns only a block's direct children per call and
+    flags deeper content with has_children. Toggles and tables keep their content
+    (the workstream rows) one level down, so hydrate the tree before parsing.
+    Bounded depth guards against pathological nesting; failures are logged, never
+    fatal (a section that can't be read is simply skipped).
+    """
+    if depth > 5:
+        return blocks
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        if b.get("has_children") and "children" not in b:
+            try:
+                kids = notion_client.get_block_children(b.get("id", ""))
+            except Exception as exc:  # one unreadable branch must not fail the run
+                logger.warning("Could not read children of block %s (%s)", b.get("id"), exc)
+                continue
+            b["children"] = kids
+            _hydrate_children(notion_client, kids, depth + 1)
+    return blocks
+
+
 def read_spine(notion_client, page_id: str) -> SpineData:
     """Fetch the spine page's blocks from Notion and parse them.
 
@@ -252,6 +457,7 @@ def read_spine(notion_client, page_id: str) -> SpineData:
         SpineData parsed from the page.
     """
     blocks = notion_client.get_block_children(page_id)
+    _hydrate_children(notion_client, blocks)
     spine = parse_spine_blocks(blocks)
     try:
         page = notion_client.get_page(page_id)

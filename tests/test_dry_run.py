@@ -87,5 +87,7 @@ def test_dry_run_report_uses_would_wording(board, make_settings, db_path, spine,
     settings = make_settings(report_file=str(tmp_path / "r.txt"))
     _, text, _ = run_pipeline(board, settings, db_path, now_utc, dry_run=True, first_run=True,
                               spine=spine, trello=MagicMock(), judgments=_JUDGMENTS)
-    assert "would create the weekly spine-review reminder" in text
-    assert "would merge" in text or "would move" in text or "would rename" in text
+    # New format: "Would: <action>" for done items; recently-archived parenthetical "would move".
+    assert "Would: create the weekly spine-review reminder card" in text
+    assert "would move to the Agent Archive list" in text
+    assert "Did:" not in text        # never past-tense in dry-run

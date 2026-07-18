@@ -6,9 +6,15 @@ are NO LONGER NEEDED and should be moved to the Agent Archive list. Use the spin
 {inscope_json}
 
 A card is "no longer needed" if ANY holds:
-- its workstream is marked Done (or Winding down) on the spine;
+- its workstream is marked Done (or Winding down / Complete) on the spine;
 - an event or deadline it depends on has clearly passed with nothing left to do;
 - it is titled "[Owner: Name]" (a delegated/handed-off item).
+
+Do NOT flag a card because it duplicates, is redundant with, or is a copy of
+another card. Duplicates are handled by the separate merge pass, which
+consolidates every copy's text into one survivor. Archiving a "redundant copy"
+here would throw that card away without consolidating it — never do that. Only
+flag a card for a NON-duplicate reason above.
 
 Return one object ONLY for cards that ARE no longer needed:
 - "card_id": the card id (only ids from the data above)

@@ -2,6 +2,26 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Duplicates were archived as "redundant copies" instead of merged
+- **Symptom:** a run produced zero merges while three identical "Connect with Mac
+  on IC-to-account mapping" cards surfaced as in-scope "no longer needed" archive
+  proposals whose reasons said "duplicate/redundant". Archiving a redundant copy
+  discards it without consolidating its text into a survivor — the exact data loss
+  the merge invariant exists to prevent.
+- **Root cause:** the merge>archive precedence was only enforced via
+  `skip_ids=merge_claimed` — cards the cluster pass tagged as a duplicate cluster.
+  When the cluster pass missed the duplicates (zero merges), nothing stopped the
+  in-scope archive pass from classifying them as "no longer needed / redundant",
+  and there was no guard rejecting a duplicate-shaped archive reason. The archive
+  prompt also never told the model that duplicates belong to the merge pass.
+- **Fix:** enforced in code, not just the prompt. `execute.is_duplicate_archive_reason`
+  matches duplicate/redundant/copy reasons, and `execute_inscope_archive` now skips
+  (never archives, never proposes) any verdict with such a reason, logging a note;
+  the pipeline also excludes those cards from `archive_claimed` so they stay
+  eligible to merge. `prompts/inscope_archive.md` now explicitly excludes duplicates.
+  Regressions: `test_inscope_archive.py::test_inscope_archive_skips_duplicate_reasoned_verdict`
+  and `test_e2e.py::test_e2e_duplicate_reasoned_archive_dropped_without_merge`.
+
 ## Obsolete in-scope cards were date-fixed instead of archived
 - **Symptom:** a dry-run queued four "[Owner: Marah/Matt/Hunter]" cards for
   due-date fixes. Those are delegated/handed-off items — archive candidates — so

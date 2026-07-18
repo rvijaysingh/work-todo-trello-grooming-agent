@@ -96,3 +96,30 @@ def test_inscope_archive_skips_merge_claimed(board, settings, db_path, now_utc):
     tier2, archived = ex.execute_inscope_archive(db_path, mut, board, verdicts, settings,
                                                  now_utc, NOW_ISO, result, skip_ids={"owner_dead"})
     assert archived == set() and _ops(mut, "move_card") == []
+
+
+# ── Precedence: duplicates are owned by the merge pass, never archived ───────
+
+def test_is_duplicate_archive_reason_matches_variants():
+    assert ex.is_duplicate_archive_reason("Redundant copy of dup_exact_b") is True
+    assert ex.is_duplicate_archive_reason("This duplicates another card") is True
+    assert ex.is_duplicate_archive_reason("A redundant duplicate") is True
+    assert ex.is_duplicate_archive_reason("Workstream marked Done on the spine") is False
+    assert ex.is_duplicate_archive_reason("") is False
+    assert ex.is_duplicate_archive_reason(None) is False
+
+
+def test_inscope_archive_skips_duplicate_reasoned_verdict(board, settings, db_path, now_utc):
+    # Regression: the in-scope archive pass must NOT archive (or propose to archive)
+    # a card whose reason says it is a duplicate/redundant copy — even when no merge
+    # claimed it. Duplicates belong to the merge pipeline (merge > archive).
+    mut = _mut()
+    result = ex.ExecutionResult()
+    verdicts = [{"card_id": "dup_exact_a", "confidence": 95,
+                 "reason": "Redundant duplicate copy of dup_exact_b"}]
+    tier2, archived = ex.execute_inscope_archive(db_path, mut, board, verdicts, settings,
+                                                 now_utc, NOW_ISO, result)
+    assert archived == set()
+    assert tier2 == []                       # not proposed either
+    assert _ops(mut, "move_card") == []
+    assert any("duplicate" in n.lower() for n in result.notes)

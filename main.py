@@ -17,6 +17,7 @@ Unhandled exceptions send a crash alert and re-raise (non-zero exit).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import traceback
@@ -193,7 +194,10 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     tier2_inscope, archived_ids = ex.execute_inscope_archive(
         db_path, mutator, board, inscope_archive_verdicts, settings, now_utc, now_iso, result,
         skip_ids=merge_claimed)
-    archive_claimed = {v["card_id"] for v in inscope_archive_verdicts} | archived_ids
+    # A duplicate-reasoned archive verdict is dropped by the archive pass (it
+    # belongs to merge); don't let it claim its card away from hygiene either.
+    archive_claimed = {v["card_id"] for v in inscope_archive_verdicts
+                       if not ex.is_duplicate_archive_reason(v.get("reason"))} | archived_ids
     claimed = merge_claimed | archive_claimed
 
     tier2_due = ex.execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings,
@@ -211,10 +215,16 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     # Phase 5 — report
     stats = _health_stats(board, settings, in_scope_cards, wide_cards, scratch_ids, processed)
     approval_rates = _approval_rates(db_path)
+    prev_stats = _load_prev_stats(db_path)
     report_text = rep.build_report(result, board, settings, now_iso, dry_run, first_run,
-                                   stats=stats, approval_rates=approval_rates)
+                                   stats=stats, approval_rates=approval_rates,
+                                   prev_stats=prev_stats)
     rep.write_report_file(report_text, settings.report_file)
     rep.publish_report_card(mutator, board, settings, report_text)
+    # Persist this run's health stats for next run's day-over-day deltas (a real
+    # run only — a dry-run must never become the baseline the next run diffs).
+    if not dry_run:
+        storage.kv_set(db_path, "last_health_stats", json.dumps(stats))
 
     # Persist post-run snapshot (agent's intended end-state, so its own changes
     # are not mis-read as user edits next run). Skipped in dry-run — a simulated
@@ -359,6 +369,18 @@ def _health_stats(board, settings, in_scope_cards, wide_cards, scratch_ids, proc
         "hygiene_coverage_pct": coverage,
         "scratch_lists": scratch_lists,
     }
+
+
+def _load_prev_stats(db_path) -> dict:
+    """Prior run's health stats (for day-over-day deltas), or {} if none/unreadable."""
+    raw = storage.kv_get(db_path, "last_health_stats")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("Could not parse stored health stats; skipping deltas")
+        return {}
 
 
 def _approval_rates(db_path):

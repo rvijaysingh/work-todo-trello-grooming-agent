@@ -12,6 +12,7 @@ single Agent Archive list.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import guardrails as g
@@ -19,6 +20,25 @@ import storage
 from guardrails import assign_tier, fingerprint
 
 logger = logging.getLogger(__name__)
+
+# Words that mark an archive rationale as "this card duplicates another". Such
+# cards belong to the MERGE pipeline (precedence merge > archive): merge
+# consolidates every source card's text into a survivor, verified by string
+# containment, before a loser is archived. Archiving a "redundant copy" here
+# would drop it WITHOUT that consolidation — silent data loss. The in-scope
+# archive pass must never act on a duplicate reason (enforced in code, not left
+# to the LLM prompt alone).
+_DUP_ARCHIVE_REASON_RE = re.compile(
+    r"\b(duplicate|duplicates|duplicated|duplication|redundant|redundancy|"
+    r"redundant copy|copy of|copies of|dupe|dupes)\b",
+    re.IGNORECASE,
+)
+
+
+def is_duplicate_archive_reason(reason: str | None) -> bool:
+    """True if an in-scope archive reason claims the card is a duplicate/redundant
+    copy of another card. Those are owned by the merge pass, never archived here."""
+    return bool(_DUP_ARCHIVE_REASON_RE.search(reason or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +263,8 @@ def expire_labels_and_archive(db_path, mutator, board, settings, now_utc, result
                     storage.remove_archive_entry(db_path, card.id)
                 result.applied.append({"type": "trello_archive", "card_id": card.id})
                 result.recently_archived.append({"card_id": card.id, "name": card.name,
-                                                 "url": card.url, "note": TRELLO_ARCHIVE_WORDING})
+                                                 "url": card.url, "note": TRELLO_ARCHIVE_WORDING,
+                                                 "reason": "Aged out of the Agent Archive list (60+ days)"})
             else:
                 days_in = g.days_since(entered, now_utc,
                                        settings.tz_standard_offset, settings.tz_daylight_offset) or 0
@@ -251,7 +272,8 @@ def expire_labels_and_archive(db_path, mutator, board, settings, now_utc, result
                 if days_left <= 10:
                     result.recently_archived.append(
                         {"card_id": card.id, "name": card.name, "url": card.url,
-                         "note": f"{round(days_left, 1)} day(s) until Trello archive"})
+                         "note": f"{round(days_left, 1)} day(s) until Trello archive",
+                         "reason": f"{round(days_left, 1)} day(s) until it moves to Trello's archive"})
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +371,8 @@ def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -
         if not mutator.dry_run:
             storage.add_archive_entry(db_path, loser.id, now_iso)
         result.recently_archived.append({"card_id": loser.id, "name": loser.name,
-                                         "url": loser.url, "note": archive_list_wording(settings)})
+                                         "url": loser.url, "note": archive_list_wording(settings),
+                                         "reason": f"Merged into '{survivor.name}'"})
 
     if not mutator.dry_run:
         storage.record_action(
@@ -651,7 +674,8 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
 # Archive helpers (shared by merge losers, recovery archive, in-scope archive)
 # ---------------------------------------------------------------------------
 
-def _archive_card(db_path, mutator, board, card, settings, now_iso, result, comment) -> bool:
+def _archive_card(db_path, mutator, board, card, settings, now_iso, result, comment,
+                  reason: str = "") -> bool:
     """Move a card to the TOP of the Agent Archive list with a comment + ledger entry."""
     archive_list = board.list_by_name(settings.archive_list_name)
     if archive_list is None:
@@ -662,7 +686,8 @@ def _archive_card(db_path, mutator, board, card, settings, now_iso, result, comm
     if not mutator.dry_run:
         storage.add_archive_entry(db_path, card.id, now_iso)
     result.recently_archived.append({"card_id": card.id, "name": card.name, "url": card.url,
-                                     "note": archive_list_wording(settings)})
+                                     "note": archive_list_wording(settings),
+                                     "reason": reason or "No longer needed"})
     return True
 
 
@@ -686,6 +711,12 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
         cid = v["card_id"]
         if cid in skip_ids:
             continue
+        # Precedence merge > archive: a duplicate/redundant card must be merged,
+        # never archived as a "redundant copy" (would skip text consolidation).
+        if is_duplicate_archive_reason(v.get("reason")):
+            result.notes.append(
+                f"In-scope archive skipped (duplicate — belongs to the merge pass): {cid}")
+            continue
         card = board.card_by_id(cid)
         if card is None or card.list_id not in in_scope:
             continue
@@ -701,7 +732,8 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
             result.notes.append(f"In-scope archive deferred by cap: {cid}")
             continue
         ok = _archive_card(db_path, mutator, board, card, settings, now_iso, result,
-                           _change_comment(f"No longer needed; {archive_list_wording(settings)}", v))
+                           _change_comment(f"No longer needed; {archive_list_wording(settings)}", v),
+                           reason=v.get("reason") or "No longer needed")
         if not ok:
             continue
         if not mutator.dry_run:
@@ -782,7 +814,8 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
                 result.applied.append({"type": "recovery_archive", "card_id": card.id,
                                        "origin": origin})
                 result.recently_archived.append({"card_id": card.id, "name": card.name,
-                                                 "url": card.url, "note": archive_list_wording(settings)})
+                                                 "url": card.url, "note": archive_list_wording(settings),
+                                                 "reason": f"Recovered from {origin}; no longer needed"})
                 executed += 1
             continue
 
@@ -883,6 +916,8 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
         result.proposals_opened.append({
             "proposal_id": pid, "fingerprint": fp, "type": action["type"],
             "card_id": anchor,
+            "card_ids": list(card_ids),                 # all cards under this decision
+            "survivor_id": action.get("survivor_id"),   # merges: the card kept
             "title": card.name if card else anchor,
             "url": card.url if card else "",
             "action_desc": _proposed_action_desc(action, board),
@@ -897,7 +932,7 @@ def _proposed_action_desc(action: dict, board) -> str:
     atype = action.get("type")
     if atype == "merge":
         survivor = board.card_by_id(action.get("survivor_id"))
-        tgt = f"{survivor.name} ({survivor.url})" if survivor else action.get("survivor_id", "")
+        tgt = f"'{survivor.name}'" if survivor else action.get("survivor_id", "")
         return f"merge duplicates into {tgt}"
     if atype == "stale_label_removal":
         return "remove a stale time-based label"
@@ -961,7 +996,8 @@ def _execute_approved(db_path, mutator, board, action, settings, now_utc, now_is
         card = board.card_by_id(action["card_ids"][0])
         if card:
             _archive_card(db_path, mutator, board, card, settings, now_iso, result,
-                          f"Approved; {archive_list_wording(settings)}.")
+                          f"Approved; {archive_list_wording(settings)}.",
+                          reason=action.get("reason") or "Approved for archive")
     elif atype == "label_swap":
         card = board.card_by_id(action["card_ids"][0])
         target_lid = board.label_id(action.get("target_label")) if action.get("target_label") else None

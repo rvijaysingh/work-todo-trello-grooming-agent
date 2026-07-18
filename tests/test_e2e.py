@@ -26,6 +26,48 @@ def test_e2e_dedup_merge_pipeline(board, make_settings, db_path, spine, now_utc,
     assert "merge" in text.lower()
 
 
+def test_e2e_duplicate_pair_merges_never_archived_as_duplicate(board, make_settings, db_path, spine, now_utc, tmp_path):
+    # Regression (merge > archive): an in-scope near-exact duplicate pair must
+    # MERGE, and must never surface as a "no longer needed / redundant" archive —
+    # even though the archive pass wrongly flagged one as a redundant copy.
+    settings = make_settings(report_file=str(tmp_path / "r.txt"))
+    judgments = {
+        "clusters": [{"relation": "duplicate", "cluster_ids": ["dup_exact_a", "dup_exact_b"],
+                      "survivor_id": "dup_exact_b", "new_name": None,
+                      "exact_or_near_name_match": True, "llm_tier": 1, "confidence": 95}],
+        "inscope_archive": [{"card_id": "dup_exact_a", "confidence": 90,
+                             "reason": "Redundant duplicate of dup_exact_b"}],
+        "hygiene": [], "recovery": [],
+    }
+    result, text, mut = run_pipeline(board, settings, db_path, now_utc, dry_run=False, first_run=True,
+                                     spine=spine, trello=MagicMock(), judgments=judgments)
+    assert any(a["type"] == "merge" and a.get("survivor_id") == "dup_exact_b"
+               and "dup_exact_a" in a.get("loser_ids", []) for a in result.applied)
+    assert not any(a.get("type") == "inscope_archive" for a in result.applied)
+    assert not any(p.get("type") == "inscope_archive" for p in result.proposals_opened)
+
+
+def test_e2e_duplicate_reasoned_archive_dropped_without_merge(board, make_settings, db_path, spine, now_utc, tmp_path):
+    # The observed failure: the cluster pass missed the duplicates (zero merges) but
+    # the archive pass flagged one as "redundant". The code guard must still refuse
+    # to archive or propose it — never archive a duplicate as a redundant copy.
+    settings = make_settings(report_file=str(tmp_path / "r.txt"))
+    judgments = {
+        "clusters": [],
+        "inscope_archive": [{"card_id": "dup_exact_a", "confidence": 90,
+                             "reason": "Duplicate/redundant copy"}],
+        "hygiene": [], "recovery": [],
+    }
+    result, text, mut = run_pipeline(board, settings, db_path, now_utc, dry_run=False, first_run=True,
+                                     spine=spine, trello=MagicMock(), judgments=judgments)
+    archive = board.list_by_name(settings.archive_list_name).id
+    assert not any(e["card_id"] == "dup_exact_a" and e.get("target_list_id") == archive
+                   for e in _ops(mut, "move_card"))
+    assert not any(p.get("card_id") == "dup_exact_a" for p in result.proposals_opened)
+    assert not any(a.get("card_id") == "dup_exact_a" and a.get("type") == "inscope_archive"
+                   for a in result.applied)
+
+
 def test_e2e_hygiene_pipeline(board, make_settings, db_path, spine, now_utc, tmp_path):
     settings = make_settings(report_file=str(tmp_path / "r.txt"))
     judgments = {"clusters": [], "recovery": [],

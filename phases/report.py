@@ -30,6 +30,16 @@ import re
 from datetime import timedelta
 
 import guardrails as g
+from vocab import (
+    ACTION_ARCHIVE,
+    ACTION_FIX_DUE,
+    ACTION_MARK_LESS,
+    ACTION_MARK_MORE,
+    ACTION_MERGE,
+    ACTION_RECOVER,
+    ACTION_RENAME,
+    ACTION_TIME_LABEL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +69,9 @@ _DECISION_INSTRUCTION = (
 # entirely (they belong to "Recently archived"); everything else falls through to
 # "Other".
 _ARCHIVE_MOVE_TYPES = {"inscope_archive", "recovery_archive", "trello_archive"}
+# Reprioritization moves render in the "Today plan" section (with their verified
+# signals), never again under "Done automatically".
+_REPRI_MOVE_TYPES = {"reprioritize_up", "reprioritize_down"}
 _SUBSECTIONS = [
     ("Date fixes", {"dead_due_clear", "due_redate"}),
     ("Label changes", {"stale_label_removal", "label_swap", "label_expiry"}),
@@ -167,8 +180,10 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     prev_stats = prev_stats or {}
     lines: list[str] = []
 
-    auto_entries = [a for a in result.applied if a.get("type") not in _ARCHIVE_MOVE_TYPES]
+    excluded_auto = _ARCHIVE_MOVE_TYPES | _REPRI_MOVE_TYPES
+    auto_entries = [a for a in result.applied if a.get("type") not in excluded_auto]
     n_auto = len(auto_entries) + (1 if result.reminder_created else 0)
+    today_plan = getattr(result, "today_plan", None) or {}
 
     # Header + at-a-glance --------------------------------------------------
     lines.append(f"{REPORT_CARD_PREFIX} — {now_iso}")
@@ -176,16 +191,22 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     notion_notes = getattr(result, "notion_notes", []) or []
     if any("dry_run" in n for n in notion_notes):
         lines.append("Note: dry_run was set by the Notion 'Rules and thresholds' section.")
-    lines.append(
+    glance = (
         f"At a glance: {len(result.still_overdue)} need your attention | "
         f"{len(result.proposals_opened)} proposals awaiting answer | "
         f"{len(result.recently_archived)} archived | {n_auto} automatic changes")
+    if today_plan:
+        glance += (f" | Today {today_plan.get('today_count', 0)}/"
+                   f"{today_plan.get('today_target', 0)} "
+                   f"({today_plan.get('moved', 0)} moved, {today_plan.get('proposed', 0)} proposed)")
+    lines.append(glance)
     lines.append("")
 
     if dry_run:
         lines.append(_ARCHIVE_REMINDER)
         lines.append("")
 
+    _section_today_plan(lines, result, board, settings, dry_run)
     _section_still_overdue(lines, result, board, settings)
     _section_awaiting(lines, result, board, settings, now_iso)
     _section_recently_archived(lines, result, board, settings, dry_run)
@@ -193,6 +214,67 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     _section_health(lines, result, settings, stats, approval_rates, prev_stats, notion_notes)
 
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _section_today_plan(lines, result, board, settings, dry_run):
+    """Reprioritization summary — rendered FIRST (before 'Still overdue').
+
+    Shows current list sizes vs targets, each executed Mark More/Less
+    Time-sensitive move with its code-verified signals, then one-line summaries of
+    open reprioritization proposals (whose full entries live under 'Awaiting your
+    decision'). Dry-run uses 'would' wording throughout.
+    """
+    plan = getattr(result, "today_plan", None)
+    if not plan:
+        return
+    moved = plan.get("moved", 0)
+    proposed = plan.get("proposed", 0)
+    tc, tt = plan.get("today_count", 0), plan.get("today_target", 0)
+    nc, nt = plan.get("nfd_count", 0), plan.get("nfd_target", 0)
+    move_verb = "would move" if dry_run else "moved"
+
+    lines.append("== Today plan ==")
+    if moved == 0 and proposed == 0:
+        # Empty state (spec wording).
+        lines.append(f"Today: {tc} cards (target {tt}) — no changes proposed.")
+        lines.append(f"Next Few Days: {nc} cards (target {nt}) — no changes proposed.")
+        lines.append("")
+        return
+    lines.append(f"Today: {tc} cards, target {tt} — {moved} {move_verb} automatically, "
+                 f"{proposed} proposed")
+    lines.append(f"Next Few Days: {nc} cards, target {nt}")
+    lines.append("")
+
+    executed = getattr(result, "reprioritizations", []) or []
+    if executed:
+        verb = "Would" if dry_run else "Did"
+        lines.append("-- Moves made --")
+        blocks = []
+        for i, m in enumerate(executed, 1):
+            card = _card(board, m.get("card_id"))
+            title = m.get("name") or (card.name if card else m.get("card_id"))
+            action = ACTION_MARK_MORE if m.get("direction") == "up" else ACTION_MARK_LESS
+            sigs = ", ".join(m.get("verified_signals", [])) or "n/a"
+            conf = m.get("confidence")
+            conf_s = f" Confidence: {int(conf)}%." if conf is not None else ""
+            block = [_entry_header(f"#{i}", title, card.due if card else None, settings),
+                     f"{verb}: {action}: move to {m.get('dest', '?')}. "
+                     f"Verified signals: {sigs}.{conf_s}"]
+            block.extend(_labels_desc(card))
+            blocks.append(block)
+        _flush(lines, blocks)
+
+    repri_props = [p for p in result.proposals_opened
+                   if p.get("type") in _REPRI_MOVE_TYPES]
+    if repri_props:
+        lines.append("-- Open reprioritization proposals (answer under 'Awaiting your decision') --")
+        for p in repri_props:
+            action = ACTION_MARK_MORE if p.get("type") == "reprioritize_up" else ACTION_MARK_LESS
+            conf = p.get("confidence")
+            conf_s = f" (Confidence {int(conf)}%)" if conf is not None else ""
+            lines.append(f"- {p.get('title', p.get('card_id'))} — {action}: "
+                         f"move to {p.get('dest_name', '?')}{conf_s}")
+        lines.append("")
 
 
 def _section_still_overdue(lines, result, board, settings):
@@ -340,30 +422,36 @@ def _done_block(num, a, board, settings, dry_run) -> list[str]:
 
 
 def _auto_phrase(a, board, settings) -> str:
+    """Report 'Did:'/'Would:' phrase, leading with the canonical action vocabulary."""
     t = a.get("type")
     if t == "merge":
         survivor = _card(board, a.get("survivor_id"))
         n = len(a.get("loser_ids", []))
         sname = survivor.name if survivor else a.get("survivor_id", "")
-        return f"merge {n} duplicate(s) into survivor '{sname}'"
+        return f"{ACTION_MERGE} — merge {n} duplicate(s) into survivor '{sname}'"
     if t == "rename":
-        return f"rename to '{a.get('new_name')}'"
+        return f"{ACTION_RENAME} — rename to '{a.get('new_name')}'"
     if t == "stale_label_removal":
-        return f"remove stale label '{a.get('label', 'a stale label')}'"
+        return f"{ACTION_TIME_LABEL} — remove stale label '{a.get('label', 'a stale label')}'"
     if t == "label_swap":
-        return f"swap label '{a.get('label')}' → '{a.get('target_label')}'"
+        return f"{ACTION_TIME_LABEL} — swap label '{a.get('label')}' -> '{a.get('target_label')}'"
     if t == "label_expiry":
-        return "remove the aged Agent: Auto-Updated label"
+        return f"{ACTION_TIME_LABEL} — remove the aged Agent: Auto-Updated label"
     if t == "dead_due_clear":
-        return "clear the long-overdue due date"
+        return f"{ACTION_FIX_DUE} — clear the long-overdue due date"
     if t == "due_redate":
         new_due = _fmt_due(a.get("new_due"), settings) or a.get("new_due")
-        return f"re-date the overdue due date (new due {new_due})"
+        return f"{ACTION_FIX_DUE} — re-date the overdue due date (new due {new_due})"
     if t == "recovery_route":
-        return f"recover from {a.get('origin', '?')} → {a.get('dest', '?')}"
+        return f"{ACTION_RECOVER} — recover from {a.get('origin', '?')} -> {a.get('dest', '?')}"
     if t == "recovery_merge":
         surv = _card(board, a.get("survivor_id"))
-        return f"recover from {a.get('origin', '?')} and merge into '{surv.name if surv else ''}'"
+        return (f"{ACTION_RECOVER} — recover from {a.get('origin', '?')} and merge into "
+                f"'{surv.name if surv else ''}'")
+    if t == "reprioritize_up":
+        return f"{ACTION_MARK_MORE} — move to {a.get('dest', '?')}"
+    if t == "reprioritize_down":
+        return f"{ACTION_MARK_LESS} — move to {a.get('dest', '?')}"
     if t and t.startswith("approved_"):
         return f"execute approved proposal ({t[len('approved_'):]})"
     return t or "review"
@@ -397,9 +485,11 @@ def _section_health(lines, result, settings, stats, approval_rates, prev_stats, 
     lines.append(f"Tier-2 approvals: {approval_rates.get('approved', 0)}  "
                  f"rejections: {approval_rates.get('rejected', 0)}  "
                  f"rate: {approval_rates.get('rate', 'n/a')}")
-    lines.append(f"Auto-mode: tier1_stale_label_removal={settings.tier1_stale_label_removal}  "
-                 f"tier1_recovery_archive={settings.tier1_recovery_archive}  "
-                 f"tier1_due_date_clear={settings.tier1_due_date_clear}")
+    mode = settings.mode_word
+    lines.append(f"Modes: archive_mode={mode(settings.archive_mode)}  "
+                 f"due_date_fix_mode={mode(settings.due_date_fix_mode)}  "
+                 f"time_label_fix_mode={mode(settings.time_label_fix_mode)}  "
+                 f"reprioritization_mode={mode(settings.reprioritization_mode)}")
     if result.rejections_recorded:
         lines.append(f"Rejections detected this run: {len(result.rejections_recorded)}")
     for note in notion_notes:

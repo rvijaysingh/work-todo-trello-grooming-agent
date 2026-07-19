@@ -208,8 +208,19 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
                                                  skip_ids=claimed)
     tier2_archives = ex.execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_iso, result)
 
+    # Reprioritization runs AFTER merges/archives/hygiene/recovery, so the Today /
+    # Next Few Days targets apply to the already-cleaned board (design §5.4).
+    from phases import reprioritize as repri
+    repri_verdicts = judgments.get("reprioritization")
+    if repri_verdicts is None:
+        repri_verdicts = _run_reprioritization_judgment(
+            llm, prompts, spine, board, mutator, settings, now_utc)
+    tier2_repri = repri.run_reprioritization(db_path, mutator, board, repri_verdicts, settings,
+                                             spine, now_utc, now_iso, result)
+
     tier2_actions = _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due,
                                    tier2_labels, tier2_inscope)
+    tier2_actions.extend(tier2_repri)
     ex.generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso, result)
 
     # Phase 5 — report
@@ -295,6 +306,23 @@ def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity
         "labels": label_verdicts,
         "recovery": recovery,
     }
+
+
+def _run_reprioritization_judgment(llm, prompts, spine, board, mutator, settings, now_utc):
+    """Reprioritization LLM pass — run AFTER execution so the candidate payload
+    reflects the cleaned board (post merge/archive/hygiene/recovery). Returns []
+    when the LLM is unavailable (tests inject verdicts directly instead)."""
+    if llm is None or prompts is None:
+        return []
+    from phases import reprioritize as repri
+
+    known_ids = board.all_card_ids()
+    board_summary = f"{len(board.cards)} cards across {len(board.lists)} lists"
+    prefix = judge.build_system_prefix(prompts, spine, board_summary, _RULES)
+    payload = repri.reprioritization_payload(board, mutator, spine, settings, now_utc)
+    if not payload.get("up_candidates") and not payload.get("down_candidates"):
+        return []
+    return judge.reprioritize_judge(llm, prompts, prefix, payload, known_ids)
 
 
 def _merge_owner_archives(inscope_cards, llm_archives):

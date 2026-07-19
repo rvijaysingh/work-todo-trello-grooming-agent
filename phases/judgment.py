@@ -267,6 +267,22 @@ def classify_labels(llm, prompt_loader, system_prefix, labels_payload, known_ids
     return valid
 
 
+def reprioritize_judge(llm, prompt_loader, system_prefix, repri_payload, known_ids, max_tokens=3000):
+    """Reprioritization judgment (Mark More/Less Time-sensitive). Returns validated
+    verdicts: {card_id, direction, target_list, signals[], confidence, reason,
+    label_change?, conflicts_placement?}.
+
+    The code gate (phases/reprioritize.py) re-verifies every claimed signal against
+    real card/spine data and enforces the confidence floor, exemptions, and cap —
+    this pass only proposes; it never decides automatic vs proposed.
+    """
+    prompt = prompt_loader.load("reprioritize.md", {"repri_json": json.dumps(repri_payload)})
+    text = call_llm(llm, prompt, system_prefix, max_tokens=max_tokens)
+    items = extract_items(parse_json(text), "moves")
+    valid, _ = validate_items(items, known_ids, ["card_id", "direction", "target_list"], ["card_id"])
+    return valid
+
+
 def recovery_triage(llm, prompt_loader, system_prefix, recovery_payload, known_ids):
     """Recovery triage. Returns validated verdicts.
 

@@ -18,6 +18,15 @@ from dataclasses import dataclass, field
 import guardrails as g
 import storage
 from guardrails import assign_tier, fingerprint
+from vocab import (
+    ACTION_ARCHIVE,
+    ACTION_FIX_DUE,
+    ACTION_MERGE,
+    ACTION_RECOVER,
+    ACTION_RENAME,
+    ACTION_TIME_LABEL,
+    action_phrase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +134,8 @@ class ExecutionResult:
     still_overdue: list = field(default_factory=list)        # dead-due but still matters
     recoveries: list = field(default_factory=list)
     demoted_recoveries: list = field(default_factory=list)
+    reprioritizations: list = field(default_factory=list)   # executed More/Less moves
+    today_plan: dict = field(default_factory=dict)           # counts vs targets (report)
     expired_proposals: list = field(default_factory=list)
     reminder_created: bool = False
     notion_notes: list = field(default_factory=list)         # Notion Rules override notes
@@ -302,7 +313,8 @@ def compose_survivor_desc(survivor, losers) -> str:
 def _merge_audit_comment(survivor, losers, verdict, settings) -> str:
     """The audit-trail comment (links + confidence) written to the survivor."""
     src = ", ".join(f"{l.name} ({l.url or l.id})" for l in losers)
-    line = f"Merged in {len(losers)} duplicate(s): {src}. Sources {archive_list_wording(settings)}."
+    line = (f"{ACTION_MERGE}: Merged in {len(losers)} duplicate(s): {src}. "
+            f"Sources {archive_list_wording(settings)}.")
     reason = verdict.get("reason")
     if reason:
         line += f" {reason}"
@@ -366,7 +378,8 @@ def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -
     for loser in losers:
         mutator.add_comment(
             loser.id,
-            f"Merged into {survivor.url or survivor.id}; {archive_list_wording(settings)}.")
+            f"{ACTION_MERGE}: Merged into {survivor.url or survivor.id}; "
+            f"{archive_list_wording(settings)}.")
         mutator.move_card(loser.id, archive_list.id, position="top")
         if not mutator.dry_run:
             storage.add_archive_entry(db_path, loser.id, now_iso)
@@ -492,8 +505,8 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         card = board.card_by_id(v["card_id"])
         old_name = card.name
         _apply_rename(mutator, board, card, v["new_name"], v.get("new_desc"), auto_id, settings)
-        mutator.add_comment(card.id, _change_comment(
-            f"Renamed from '{old_name}' to '{v['new_name']}'", v))
+        mutator.add_comment(card.id, _action_comment(
+            ACTION_RENAME, f"Renamed from '{old_name}' to '{v['new_name']}'", v))
         if not mutator.dry_run:
             storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
                                   {"new_name": v["new_name"], "original_name": old_name}, "success")
@@ -546,12 +559,14 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         if not touchable(cid):
             continue
         if redate:
-            mutator.add_comment(cid, _change_comment(
+            mutator.add_comment(cid, _action_comment(
+                ACTION_FIX_DUE,
                 f"Old due date was {card.due}; set new due {new_due} (from written source)", v))
             mutator.set_due(cid, new_due)
             atype = "due_redate"
         else:
-            mutator.add_comment(cid, _change_comment(
+            mutator.add_comment(cid, _action_comment(
+                ACTION_FIX_DUE,
                 f"Old due date was {card.due}; cleared it (long past, nothing left to do)", v))
             mutator.clear_due(cid)
             atype = "dead_due_clear"
@@ -578,12 +593,19 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
     return tier2_due
 
 
-def _change_comment(summary: str, verdict: dict) -> str:
-    """Format an auto-action comment: '<summary>. <reason> Confidence: NN%.'"""
-    line = summary.rstrip(".") + "."
+def _action_comment(action: str, detail: str, verdict: dict) -> str:
+    """Format an auto-action comment in the canonical vocabulary layout:
+
+        '<Action>: <detail>. Reason: <one line>. Confidence: NN%.'
+
+    `action` is a phrase from vocab.py; `detail` is the specific change. The
+    reason is appended (unless already contained in the detail) and the
+    confidence last.
+    """
+    line = f"{action}: {detail.rstrip('.')}."
     reason = verdict.get("reason")
-    if reason and reason not in summary:
-        line += f" {reason.rstrip('.')}."
+    if reason and reason.rstrip(".").lower() not in detail.lower():
+        line += f" Reason: {reason.rstrip('.')}."
     conf = verdict.get("confidence")
     if conf is not None:
         line += f" Confidence: {int(conf)}%."
@@ -637,8 +659,8 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
             if auto_id and auto_id not in new_labels:
                 new_labels.append(auto_id)
             mutator.set_labels(card.id, new_labels)
-            mutator.add_comment(card.id, _change_comment(
-                f"Swapped stale label '{label}' to '{target}'", action))
+            mutator.add_comment(card.id, _action_comment(
+                ACTION_TIME_LABEL, f"Swapped stale label '{label}' to '{target}'", action))
             if not mutator.dry_run:
                 storage.record_action(db_path, now_iso, now_iso, g.TIER1, "label_swap",
                                       [card.id], {"old": label, "new": target}, "success")
@@ -662,7 +684,8 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
         if auto_id and auto_id not in remaining:
             remaining.append(auto_id)
         mutator.set_labels(card.id, remaining)
-        mutator.add_comment(card.id, _change_comment(f"Removed stale label '{label}'", action))
+        mutator.add_comment(card.id, _action_comment(
+            ACTION_TIME_LABEL, f"Removed stale label '{label}'", action))
         if not mutator.dry_run:
             storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
                                   [card.id], {"label": label}, "success")
@@ -732,7 +755,8 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
             result.notes.append(f"In-scope archive deferred by cap: {cid}")
             continue
         ok = _archive_card(db_path, mutator, board, card, settings, now_iso, result,
-                           _change_comment(f"No longer needed; {archive_list_wording(settings)}", v),
+                           _action_comment(ACTION_ARCHIVE,
+                                           f"no longer needed; {archive_list_wording(settings)}", v),
                            reason=v.get("reason") or "No longer needed")
         if not ok:
             continue
@@ -804,7 +828,8 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
                 continue
             # Tier 1 archive routes through the Agent Archive list (never hard-archive).
             if archive_list:
-                mutator.add_comment(card.id, _change_comment(
+                mutator.add_comment(card.id, _action_comment(
+                    ACTION_ARCHIVE,
                     f"Recovered from {origin}; no longer needed, {archive_list_wording(settings)}", v))
                 mutator.move_card(card.id, archive_list.id, position="top")
                 if not mutator.dry_run:
@@ -829,7 +854,8 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             facts = _merge_action_facts(verdict, board, settings, in_scope)
             facts["type"] = "recovery_merge"
             if assign_tier(facts, settings) == g.TIER1 and board.card_by_id(target):
-                mutator.add_comment(card.id, f"Recovered from {origin}; merged into active card.")
+                mutator.add_comment(
+                    card.id, f"{ACTION_RECOVER}: Recovered from {origin}; merged into active card.")
                 execute_merge(db_path, mutator, board, verdict, settings, now_iso, result)
                 if not mutator.dry_run:
                     storage.add_recovery(db_path, card.id, origin, "merge", now_iso)
@@ -867,7 +893,7 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             result.notes.append(f"Recovery {card.id} skipped: no destination list resolved")
             continue
 
-        mutator.add_comment(card.id, f"Recovered from {origin} by grooming agent.")
+        mutator.add_comment(card.id, f"{ACTION_RECOVER}: Recovered from {origin} by grooming agent.")
         mutator.move_card(card.id, dest_id)
         if not mutator.dry_run:
             storage.add_recovery(db_path, card.id, origin, disp_final, now_iso)
@@ -907,7 +933,7 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
         card = board.card_by_id(anchor)
         if card and proposed_id:
             _add_label(mutator, card, proposed_id)
-            mutator.add_comment(anchor, _proposal_comment(action))
+            mutator.add_comment(anchor, _proposal_comment(action, board))
         if mutator.dry_run:
             pid = 0
         else:
@@ -923,26 +949,34 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
             "action_desc": _proposed_action_desc(action, board),
             "reason": action.get("reason", ""),
             "confidence": action.get("confidence"),
+            "dest_name": action.get("dest_name"),   # reprioritization destination (Today plan)
         })
         open_count += 1
 
 
 def _proposed_action_desc(action: dict, board) -> str:
-    """Human-readable one-liner for the proposed action (title/url friendly)."""
+    """Vocabulary one-liner for a proposed action (leads with the action phrase).
+
+    Used identically in the proposal card comment and the report's "Proposed:"
+    line, so both speak the canonical action vocabulary.
+    """
     atype = action.get("type")
     if atype == "merge":
         survivor = board.card_by_id(action.get("survivor_id"))
         tgt = f"'{survivor.name}'" if survivor else action.get("survivor_id", "")
-        return f"merge duplicates into {tgt}"
+        return f"{ACTION_MERGE} into {tgt}"
     if atype == "stale_label_removal":
-        return "remove a stale time-based label"
+        return f"{ACTION_TIME_LABEL} (remove the stale must-do label)"
     if atype == "label_swap":
-        return "swap the stale 'must do' label to the matching tier"
+        return f"{ACTION_TIME_LABEL} (swap the stale must-do label to the matching tier)"
     if atype in ("recovery_archive", "inscope_archive"):
-        return "move to the Agent Archive list (no longer needed)"
+        return f"{ACTION_ARCHIVE} (no longer needed)"
     if atype in ("dead_due_clear", "due_redate"):
-        return "clear or re-date a long-overdue due date"
-    return atype or "review"
+        return f"{ACTION_FIX_DUE} (clear or re-date the long-overdue date)"
+    if atype in ("reprioritize_up", "reprioritize_down"):
+        dest = action.get("dest_name") or action.get("target_list") or "a fitting list"
+        return f"{action_phrase(atype)}: move to {dest}"
+    return action_phrase(atype)
 
 
 # ---------------------------------------------------------------------------
@@ -1017,12 +1051,24 @@ REPORT_CARD_PREFIX = "Grooming Report"
 REMINDER_CARD_TITLE = "Review agent spine: update Active Workstreams and People"
 
 
-def _proposal_comment(action: dict) -> str:
-    """Proposal comment: reason (+ Confidence). Approve with 'yes'/'approve'."""
-    line = action.get("reason", "Agent proposal — review.").rstrip(".") + "."
+def _proposal_comment(action: dict, board) -> str:
+    """Proposal comment in the canonical vocabulary layout.
+
+    '<Action detail>. Reason: <one line>. Confidence: NN%. Reply ...' — leads with
+    the same vocabulary phrase used in the report and, for reprioritization moves
+    that contradict placement, prepends the placement-conflict note.
+    """
+    desc = _proposed_action_desc(action, board)
+    prefix = action.get("conflict_note")
+    line = (f"{prefix} " if prefix else "") + desc.rstrip(".") + "."
+    reason = action.get("reason")
+    if reason and reason.rstrip(".").lower() not in desc.lower():
+        line += f" Reason: {reason.rstrip('.')}."
     conf = action.get("confidence")
     if conf is not None:
         line += f" Confidence: {int(conf)}%."
+    if action.get("conflict_note"):
+        line += " Reject if your placement stands."
     line += " Reply 'yes'/'approve' to apply, 'no' or remove the label to reject."
     return line
 

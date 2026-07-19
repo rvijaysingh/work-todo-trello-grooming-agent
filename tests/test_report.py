@@ -159,8 +159,8 @@ def test_done_automatically_subsections_order_and_verbs(board, settings):
     idxs = [text.index(s) for s in order]
     assert idxs == sorted(idxs)
     assert "-- Recovered from Scratch --" not in text     # empty subsection omitted
-    assert "Did: clear the long-overdue due date" in text
-    assert "Did: rename to 'Call Dana'" in text
+    assert "Did: Fix Due Date — clear the long-overdue due date" in text
+    assert "Did: Rename Card — rename to 'Call Dana'" in text
     assert "Would:" not in text                           # live run
     assert "create the weekly spine-review reminder card" in text  # reminder under Other
 
@@ -169,7 +169,7 @@ def test_done_automatically_dry_run_uses_would(board, settings):
     result = ex.ExecutionResult()
     result.applied.append({"type": "rename", "card_id": "name_pipe", "new_name": "Call Dana"})
     text = _build(result, board, settings, dry_run=True)
-    assert "Would: rename to 'Call Dana'" in text
+    assert "Would: Rename Card — rename to 'Call Dana'" in text
     assert "Did:" not in text
 
 

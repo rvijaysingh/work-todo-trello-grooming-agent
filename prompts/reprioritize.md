@@ -31,15 +31,24 @@ to the fitting list. Where the evidence is a hard deadline, you may also add or
 upgrade the matching "must do" time label via `label_change`.
 
 ### Downward moves (Mark Less Time-sensitive)
-Only when `over_today` or `over_nfd` is true. From `down_candidates`, rank the
-WEAKEST first — no "must do" label, no near due date, low/no workstream priority,
-longest since last activity — and move just enough down (Today → Next Few Days,
-Next Few Days → This Week) to approach the target. Never demote a card marked
-`has_today_mustdo` unless you include a `label_change` that downgrades that label
-and state why.
+When `over_today` or `over_nfd` is true, the list is overloaded and you SHOULD
+return demotion moves — an empty response leaves it overloaded, which is the
+problem this pass exists to fix. From `down_candidates`, rank the WEAKEST first
+(cards flagged `weak: true` first — no "must do" label, no near due date, low/no
+workstream priority — then by longest since last activity) and demote enough of
+them (Today → Next Few Days, Next Few Days → This Week) to bring the list toward
+its target, up to the per-run cap. Each demotion uses the `"weak"` signal.
+
+You do NOT need to hold back out of caution: the code separately enforces the hard
+exemptions (recently-placed cards, and `has_today_mustdo` cards) and adds the
+placement-conflict note to every demotion — so propose the weakest cards freely
+and let the gate filter. Only skip a `has_today_mustdo` card unless you include a
+`label_change` that downgrades that label with a stated reason.
 
 ### Output
-Return `{{"moves": [ ... ]}}`, each move:
+Return `{{"moves": [ ... ]}}` — return an actual list of moves whenever there are
+clear promotions or (when over target) weak cards to demote; only return an empty
+list if nothing genuinely qualifies. Each move:
 - "card_id": a card id from the data above
 - "direction": "up" or "down"
 - "target_list": the destination list name ("Today", "Next Few Days", "This Week",

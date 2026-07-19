@@ -492,23 +492,41 @@ _OVERRIDE_TYPES: dict[str, str] = {
     "max_recoveries_per_run": "int",
     "max_inscope_archives_per_run": "int",
     "max_proposals_open": "int",
-    "auto_min_confidence": "int",
+    "automatic_action_confidence": "int",
     "auto_pause_after_failures": "int",
     "name_min_length": "int",
     "name_max_length": "int",
     "wide_block_jaccard": "float",
     "narrow_hint_jaccard": "float",
-    "tier1_stale_label_removal": "bool",
-    "tier1_recovery_archive": "bool",
-    "tier1_due_date_clear": "bool",
+    # Automatic-mode toggles: accept "automatic"/"proposed" or bool.
+    "time_label_fix_mode": "mode",
+    "archive_mode": "mode",
+    "due_date_fix_mode": "mode",
+    # Reprioritization pass (Problem 5).
+    "reprioritization_mode": "mode",
+    "time_reprioritization_confidence": "int",
+    "today_list_target": "int",
+    "next_few_days_target": "int",
+    "max_reprioritization_moves_per_run": "int",
+    # NOTE: demotion_exempt_hours, priority_labels, reprioritization_due_days are
+    # file-only config (not exposed as Notion Rules keys) — the spine states the
+    # 48h placement rule as prose, so keeping them off the parser avoids drift.
     "dry_run": "bool",
     "weekly_sweep_day": "weekday",
     "spine_review_day": "review_day",
     "archive_list_name": "str",
+    # ---- Pre-rename aliases: recognized, coerced, applied to the new attr ----
+    "tier1_stale_label_removal": "mode",
+    "tier1_recovery_archive": "mode",
+    "tier1_due_date_clear": "mode",
+    "auto_min_confidence": "int",
 }
 
 _TRUE = {"true", "yes", "1", "on"}
 _FALSE = {"false", "no", "0", "off"}
+# Mode words: "automatic" == auto-execute (True), "proposed" == flag only (False).
+_MODE_TRUE = {"automatic", "auto", "true", "yes", "1", "on"}
+_MODE_FALSE = {"proposed", "propose", "false", "no", "0", "off"}
 
 
 def _coerce(typ: str, raw: str):
@@ -524,6 +542,14 @@ def _coerce(typ: str, raw: str):
             if low in _TRUE:
                 return True
             if low in _FALSE:
+                return False
+            return None
+        if typ == "mode":
+            # "automatic"/"proposed" (or bool aliases) -> bool (True == automatic).
+            low = token.lower()
+            if low in _MODE_TRUE:
+                return True
+            if low in _MODE_FALSE:
                 return False
             return None
         if typ == "weekday":

@@ -29,6 +29,26 @@ AGENT_NAME = "work-todo-trello-grooming-agent"
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
+_MODE_TRUE = {"automatic", "auto", "true", "yes", "1", "on"}
+_MODE_FALSE = {"proposed", "propose", "false", "no", "0", "off"}
+
+
+def _mode_to_bool(v, default=None):
+    """Coerce a mode value ('automatic'/'proposed' or bool) to a bool.
+
+    True == automatic (auto-execute), False == proposed (flag only). Returns
+    `default` when the value is unrecognized (None signals invalid to callers).
+    """
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in _MODE_TRUE:
+        return True
+    if s in _MODE_FALSE:
+        return False
+    return default
+
+
 class SettingsError(ValueError):
     """Raised when agent_config.json is missing or has an invalid field."""
 
@@ -62,10 +82,22 @@ class AgentSettings:
     max_recoveries_per_run: int
     max_inscope_archives_per_run: int
     max_proposals_open: int
-    tier1_stale_label_removal: bool
-    tier1_recovery_archive: bool
-    tier1_due_date_clear: bool
-    auto_min_confidence: int
+    # Automatic-mode toggles. Internally booleans (True == "automatic",
+    # False == "proposed"). The former tier1_* names remain silent aliases via
+    # the properties below. Config/Notion accept "automatic"/"proposed" or bools.
+    time_label_fix_mode: bool          # was tier1_stale_label_removal
+    archive_mode: bool                 # was tier1_recovery_archive
+    due_date_fix_mode: bool            # was tier1_due_date_clear
+    automatic_action_confidence: int   # was auto_min_confidence
+    # Reprioritization pass (design §5.4 / spine Problem 5).
+    reprioritization_mode: bool        # True == "automatic"
+    time_reprioritization_confidence: int
+    today_list_target: int
+    next_few_days_target: int
+    max_reprioritization_moves_per_run: int
+    demotion_exempt_hours: int
+    priority_labels: dict              # {label_name: role} — P0/P1 promotion signal
+    reprioritization_due_days: dict    # {role: days} — due-in-window bands
     wide_block_jaccard: float
     narrow_hint_jaccard: float
     name_min_length: int
@@ -90,6 +122,47 @@ class AgentSettings:
     def comparison_scope_lists(self) -> list[str]:
         """Edit-scope lists plus the extra comparison lists (dedup detection)."""
         return list(self.edit_scope_lists) + list(self.comparison_extra_lists)
+
+    # -- Silent aliases for the pre-rename config key names ------------------
+    # Old names still resolve (read and write) so existing callers, tests, and
+    # Notion Rules lines keep working. Modes proxy the boolean fields; the
+    # confidence alias proxies the renamed int.
+    @property
+    def tier1_stale_label_removal(self) -> bool:
+        return self.time_label_fix_mode
+
+    @tier1_stale_label_removal.setter
+    def tier1_stale_label_removal(self, v) -> None:
+        self.time_label_fix_mode = _mode_to_bool(v, default=True)
+
+    @property
+    def tier1_recovery_archive(self) -> bool:
+        return self.archive_mode
+
+    @tier1_recovery_archive.setter
+    def tier1_recovery_archive(self, v) -> None:
+        self.archive_mode = _mode_to_bool(v, default=True)
+
+    @property
+    def tier1_due_date_clear(self) -> bool:
+        return self.due_date_fix_mode
+
+    @tier1_due_date_clear.setter
+    def tier1_due_date_clear(self, v) -> None:
+        self.due_date_fix_mode = _mode_to_bool(v, default=True)
+
+    @property
+    def auto_min_confidence(self) -> int:
+        return self.automatic_action_confidence
+
+    @auto_min_confidence.setter
+    def auto_min_confidence(self, v) -> None:
+        self.automatic_action_confidence = int(v)
+
+    @staticmethod
+    def mode_word(flag: bool) -> str:
+        """Render a mode boolean as its config word (for the report)."""
+        return "automatic" if flag else "proposed"
 
 
 @dataclass
@@ -145,6 +218,23 @@ def load_settings(agent_config_path: str) -> AgentSettings:
     if not isinstance(offsets, dict) or "standard" not in offsets or "daylight" not in offsets:
         raise SettingsError("Field 'local_tz_offsets' must contain 'standard' and 'daylight'")
 
+    def mode(new_key: str, old_key: str | None, default: str = "automatic") -> bool:
+        """Read an automatic/proposed mode from the new key, then the old alias."""
+        if new_key in data:
+            raw = data[new_key]
+        elif old_key is not None and old_key in data:
+            raw = data[old_key]
+        else:
+            raw = default
+        b = _mode_to_bool(raw)
+        if b is None:
+            raise SettingsError(f"Field '{new_key}' must be 'automatic'/'proposed' or a boolean")
+        return b
+
+    def int_alias(new_key: str, old_key: str, default: int) -> int:
+        raw = data.get(new_key, data.get(old_key, default))
+        return int(raw)
+
     try:
         settings = AgentSettings(
             board_shortlink=str(req("board_shortlink")),
@@ -168,10 +258,21 @@ def load_settings(agent_config_path: str) -> AgentSettings:
             max_recoveries_per_run=int(req("max_recoveries_per_run")),
             max_inscope_archives_per_run=int(req("max_inscope_archives_per_run")),
             max_proposals_open=int(req("max_proposals_open")),
-            tier1_stale_label_removal=bool(req("tier1_stale_label_removal")),
-            tier1_recovery_archive=bool(req("tier1_recovery_archive")),
-            tier1_due_date_clear=bool(req("tier1_due_date_clear")),
-            auto_min_confidence=int(req("auto_min_confidence")),
+            time_label_fix_mode=mode("time_label_fix_mode", "tier1_stale_label_removal"),
+            archive_mode=mode("archive_mode", "tier1_recovery_archive"),
+            due_date_fix_mode=mode("due_date_fix_mode", "tier1_due_date_clear"),
+            automatic_action_confidence=int_alias(
+                "automatic_action_confidence", "auto_min_confidence", 70),
+            reprioritization_mode=mode("reprioritization_mode", None, "automatic"),
+            time_reprioritization_confidence=int(data.get("time_reprioritization_confidence", 75)),
+            today_list_target=int(data.get("today_list_target", 15)),
+            next_few_days_target=int(data.get("next_few_days_target", 20)),
+            max_reprioritization_moves_per_run=int(data.get("max_reprioritization_moves_per_run", 10)),
+            demotion_exempt_hours=int(data.get("demotion_exempt_hours", 48)),
+            priority_labels=dict(data.get("priority_labels",
+                                          {"P0. High": "today", "P1": "next_few_days"})),
+            reprioritization_due_days=dict(data.get("reprioritization_due_days",
+                                                    {"today": 1, "next_few_days": 3, "this_week": 7})),
             wide_block_jaccard=float(req("wide_block_jaccard")),
             narrow_hint_jaccard=float(req("narrow_hint_jaccard")),
             name_min_length=int(req("name_min_length")),
@@ -209,8 +310,18 @@ def _validate_settings(s: AgentSettings) -> None:
     # never reaches the Today cap in one run).
     if not (s.name_min_length < s.name_max_length):
         raise SettingsError("name_min_length must be < name_max_length")
-    if not (0 <= s.auto_min_confidence <= 100):
-        raise SettingsError("auto_min_confidence must satisfy 0 <= x <= 100")
+    if not (0 <= s.automatic_action_confidence <= 100):
+        raise SettingsError("automatic_action_confidence must satisfy 0 <= x <= 100")
+    if not (0 <= s.time_reprioritization_confidence <= 100):
+        raise SettingsError("time_reprioritization_confidence must satisfy 0 <= x <= 100")
+    for field_name, val in (
+        ("today_list_target", s.today_list_target),
+        ("next_few_days_target", s.next_few_days_target),
+        ("max_reprioritization_moves_per_run", s.max_reprioritization_moves_per_run),
+        ("demotion_exempt_hours", s.demotion_exempt_hours),
+    ):
+        if val < 0:
+            raise SettingsError(f"{field_name} must be >= 0")
     for field_name, val in (
         ("narrow_hint_jaccard", s.narrow_hint_jaccard),
         ("wide_block_jaccard", s.wide_block_jaccard),

@@ -27,10 +27,19 @@
   "max_inscope_archives_per_run": 10,
   "max_proposals_open": 20,
 
-  "tier1_stale_label_removal": true,
-  "tier1_recovery_archive": true,
-  "tier1_due_date_clear": true,
-  "auto_min_confidence": 70,
+  "time_label_fix_mode": "automatic",
+  "archive_mode": "automatic",
+  "due_date_fix_mode": "automatic",
+  "automatic_action_confidence": 70,
+
+  "reprioritization_mode": "automatic",
+  "time_reprioritization_confidence": 75,
+  "today_list_target": 15,
+  "next_few_days_target": 20,
+  "max_reprioritization_moves_per_run": 10,
+  "demotion_exempt_hours": 48,
+  "priority_labels": { "P0. High": "today", "P1": "next_few_days" },
+  "reprioritization_due_days": { "today": 1, "next_few_days": 3, "this_week": 7 },
 
   "wide_block_jaccard": 0.5,
   "narrow_hint_jaccard": 0.4,

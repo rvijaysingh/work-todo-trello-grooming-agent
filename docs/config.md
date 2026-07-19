@@ -45,9 +45,22 @@ falls back silently to the file. Because the Rules section is live config, any
 change to a behavioral default must update **both** `agent_config.json` and that
 Notion section (see CLAUDE.md). Recognized keys and coercion live in
 `spine.py::_OVERRIDE_TYPES` and cover every behavioral parameter below (the three
-`tier1_*` flags, `dry_run`, `recovery_batch_size`, `archive_list_days`,
+mode toggles `archive_mode` / `due_date_fix_mode` / `time_label_fix_mode`, the
+reprioritization keys `reprioritization_mode` / `time_reprioritization_confidence`
+/ `today_list_target` / `next_few_days_target` / `max_reprioritization_moves_per_run`,
+`automatic_action_confidence`, `dry_run`, `recovery_batch_size`, `archive_list_days`,
 `proposal_timeout_days`, `spine_review_day`, `max_inscope_archives_per_run`, other
 caps, thresholds, and windows).
+
+**Silent config aliases.** The pre-rename key names are still recognized
+everywhere a config key is read (`agent_config.json` and the Notion Rules
+section): `tier1_recovery_archive` → `archive_mode`, `tier1_due_date_clear` →
+`due_date_fix_mode`, `tier1_stale_label_removal` → `time_label_fix_mode`,
+`auto_min_confidence` → `automatic_action_confidence`. An old key sets the new
+field; boolean `true`/`false` maps to `automatic`/`proposed`. `AgentSettings`
+also exposes the old names as read/write properties, so existing code keeps
+working. **File-only keys** (not exposed as Notion Rules overrides):
+`demotion_exempt_hours`, `priority_labels`, `reprioritization_due_days`.
 
 Two other spine sections feed judgment (not config): **Active Workstreams** lines
 may optionally carry `Priority: High/Normal/Low` and `Time-sensitive: Yes/No`
@@ -110,18 +123,36 @@ enforced at startup unless noted.
 
 ### Automatic-mode toggles (shipped default is automatic)
 
-When a toggle is `true`, actions in that category execute automatically (Tier 1)
-with an explanatory card comment (reason + `Confidence: NN%`), **unless** the LLM
-marks the item borderline or reports a confidence below `auto_min_confidence` — in
-which case it becomes an `Agent: Proposed` card instead. When a toggle is `false`,
-the whole category is `Agent: Proposed`.
+Each mode takes `"automatic"` or `"proposed"` (boolean `true`/`false` are accepted
+aliases — `true` == automatic). When a mode is **automatic**, actions in that
+category execute automatically (Tier 1) with an explanatory card comment (reason +
+`Confidence: NN%`), **unless** the LLM marks the item borderline or reports a
+confidence below `automatic_action_confidence` — in which case it becomes an
+`Agent: Proposed` card. When **proposed**, the whole category is `Agent: Proposed`.
+Old key names (see "Silent config aliases" above) still set these fields.
 
 | Parameter | Type | Default | Allowed / validation | Description |
 |---|---|---|---|---|
-| `tier1_stale_label_removal` | bool | `true` | `true` / `false` | Auto-remove stale time-based labels (deterministic → confidence 100, never borderline). |
-| `tier1_recovery_archive` | bool | `true` | `true` / `false` | Auto-archive recovery cards judged no longer needed (workstream Done on the spine, an event/deadline passed with nothing left to do, or a card titled `[Owner: Name]`). |
-| `tier1_due_date_clear` | bool | `true` | `true` / `false` | Auto-apply the dead-due decision (re-date from a written source, else clear) for cards classified no-longer-matters. |
-| `auto_min_confidence` | int | `70` | `0 <= x <= 100` | An auto-eligible action with LLM confidence below this (or flagged `borderline`) is downgraded to `Agent: Proposed` instead of executing. |
+| `time_label_fix_mode` (was `tier1_stale_label_removal`) | mode | `"automatic"` | `automatic` / `proposed` (bool alias) | Auto-fix the three time labels (swap/remove); people/domain/project labels never touched. |
+| `archive_mode` (was `tier1_recovery_archive`) | mode | `"automatic"` | `automatic` / `proposed` (bool alias) | Auto-archive cards judged no longer needed (workstream Done on the spine, an event/deadline passed with nothing left to do, or a card titled `[Owner: Name]`). |
+| `due_date_fix_mode` (was `tier1_due_date_clear`) | mode | `"automatic"` | `automatic` / `proposed` (bool alias) | Auto-apply the dead-due decision (re-date from a written source, else clear) for cards classified no-longer-matters. |
+| `automatic_action_confidence` (was `auto_min_confidence`) | int | `70` | `0 <= x <= 100` | An auto-eligible non-reprioritization action with LLM confidence below this (or flagged `borderline`) is downgraded to `Agent: Proposed`. |
+
+### Reprioritization (design §5.4 / spine "Problem 5")
+
+The reprioritization pass runs AFTER merges/archives/hygiene each run and marks
+cards More/Less Time-sensitive so Today and Next Few Days reflect real priorities.
+
+| Parameter | Type | Default | Allowed / validation | Description |
+|---|---|---|---|---|
+| `reprioritization_mode` | mode | `"automatic"` | `automatic` / `proposed` (bool alias) | `automatic`: a move with a code-verified signal and confidence ≥ `time_reprioritization_confidence` executes; weaker cases propose. `proposed`: every move proposes. |
+| `time_reprioritization_confidence` | int | `75` | `0 <= x <= 100` | Confidence floor for an automatic Mark More/Less Time-sensitive move. |
+| `today_list_target` | int | `15` | `>= 0` | Target max cards on Today; demotions trigger only above this. |
+| `next_few_days_target` | int | `20` | `>= 0` | Target max cards on Next Few Days; demotions trigger only above this. |
+| `max_reprioritization_moves_per_run` | int | `10` | `>= 0` | Per-run cap on executed reprioritization moves (over-cap moves become proposals). |
+| `demotion_exempt_hours` | int | `48` | `>= 0` | **File-only.** A card placed/edited within this window is never demoted (automatically or by proposal). |
+| `priority_labels` | object | `{"P0. High": "today", "P1": "next_few_days"}` | `{label_name: role}` | **File-only.** Label names that are promotion signals and their destination role. |
+| `reprioritization_due_days` | object | `{"today": 1, "next_few_days": 3, "this_week": 7}` | `{role: days}` | **File-only.** Due-in-window bands per destination role (an overdue date satisfies every band). |
 
 ### Blocking / similarity (Phase 2, deterministic, no LLM)
 
@@ -172,7 +203,9 @@ heuristic-flagged cards take priority.
 - `recovery_today_max` is **not** bounded by `recovery_batch_size` (may exceed it).
 - `no_touch_hours >= 0` (0 disables the no-touch window).
 - `name_min_length < name_max_length`.
-- `0 <= auto_min_confidence <= 100`.
+- `0 <= automatic_action_confidence <= 100`; `0 <= time_reprioritization_confidence <= 100`.
+- `today_list_target`, `next_few_days_target`, `max_reprioritization_moves_per_run`,
+  `demotion_exempt_hours` each `>= 0`.
 - `0.0 < narrow_hint_jaccard <= 1.0` and `0.0 < wide_block_jaccard <= 1.0`.
 - `local_tz_offsets` has both `standard` and `daylight` numeric keys.
 - Every list name in `edit_scope_lists`, `comparison_extra_lists`, and
@@ -274,10 +307,19 @@ All defaults populated.
   "max_recoveries_per_run": 15,
   "max_proposals_open": 20,
 
-  "tier1_stale_label_removal": true,
-  "tier1_recovery_archive": true,
-  "tier1_due_date_clear": true,
-  "auto_min_confidence": 70,
+  "time_label_fix_mode": "automatic",
+  "archive_mode": "automatic",
+  "due_date_fix_mode": "automatic",
+  "automatic_action_confidence": 70,
+
+  "reprioritization_mode": "automatic",
+  "time_reprioritization_confidence": 75,
+  "today_list_target": 15,
+  "next_few_days_target": 20,
+  "max_reprioritization_moves_per_run": 10,
+  "demotion_exempt_hours": 48,
+  "priority_labels": { "P0. High": "today", "P1": "next_few_days" },
+  "reprioritization_due_days": { "today": 1, "next_few_days": 3, "this_week": 7 },
 
   "wide_block_jaccard": 0.5,
   "narrow_hint_jaccard": 0.4,

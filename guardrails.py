@@ -356,8 +356,8 @@ def is_borderline(action: dict, settings) -> bool:
     """True if an auto-eligible action is borderline and should be Proposed instead.
 
     Borderline when the LLM flags it (`borderline: true`) or reports a confidence
-    below `auto_min_confidence`. A missing confidence is treated as NOT borderline
-    (deterministic actions the LLM did not score still auto-execute).
+    below `automatic_action_confidence`. A missing confidence is treated as NOT
+    borderline (deterministic actions the LLM did not score still auto-execute).
     """
     if action.get("borderline"):
         return True
@@ -365,7 +365,7 @@ def is_borderline(action: dict, settings) -> bool:
     if conf is None:
         return False
     try:
-        return int(conf) < settings.auto_min_confidence
+        return int(conf) < settings.automatic_action_confidence
     except (TypeError, ValueError):
         return True
 
@@ -374,10 +374,10 @@ def assign_tier(action: dict, settings) -> int:
     """Return the enforced tier (1 or 2) for an action after LLM judgment.
 
     Forced-Tier-2 conditions on merges override any LLM/heuristic Tier-1 call.
-    The category toggles (tier1_stale_label_removal, tier1_recovery_archive,
-    tier1_due_date_clear) gate auto-execution: when the toggle is True the action
-    is Tier 1 unless it is borderline (then Tier 2); when False the whole category
-    is Tier 2 (Agent: Proposed).
+    The category modes (time_label_fix_mode, archive_mode, due_date_fix_mode)
+    gate auto-execution: when the mode is automatic the action is Tier 1 unless it
+    is borderline (then Tier 2); when proposed the whole category is Tier 2
+    (Agent: Proposed).
     """
     atype = action.get("type")
 
@@ -385,17 +385,17 @@ def assign_tier(action: dict, settings) -> int:
     if atype in ("rename", "desc_restructure"):
         return TIER1
 
-    # Category toggles — auto only when the flag is on AND the call isn't borderline.
+    # Category modes — auto only when the mode is automatic AND not borderline.
     if atype in ("dead_due_clear", "due_redate"):
-        if settings.tier1_due_date_clear and not is_borderline(action, settings):
+        if settings.due_date_fix_mode and not is_borderline(action, settings):
             return TIER1
         return TIER2
     if atype in ("stale_label_removal", "label_swap"):
-        if settings.tier1_stale_label_removal and not is_borderline(action, settings):
+        if settings.time_label_fix_mode and not is_borderline(action, settings):
             return TIER1
         return TIER2
     if atype in ("recovery_archive", "inscope_archive"):
-        if settings.tier1_recovery_archive and not is_borderline(action, settings):
+        if settings.archive_mode and not is_borderline(action, settings):
             return TIER1
         return TIER2
 

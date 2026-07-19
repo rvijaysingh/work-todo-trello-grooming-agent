@@ -268,18 +268,20 @@ def classify_labels(llm, prompt_loader, system_prefix, labels_payload, known_ids
 
 
 def reprioritize_judge(llm, prompt_loader, system_prefix, repri_payload, known_ids, max_tokens=3000):
-    """Reprioritization judgment (Mark More/Less Time-sensitive). Returns validated
-    verdicts: {card_id, direction, target_list, signals[], confidence, reason,
-    label_change?, conflicts_placement?}.
+    """Reprioritization judgment — a per-candidate VALIDATOR, not a bulk generator.
 
-    The code gate (phases/reprioritize.py) re-verifies every claimed signal against
-    real card/spine data and enforces the confidence floor, exemptions, and cap —
-    this pass only proposes; it never decides automatic vs proposed.
+    Receives the Python-pre-ranked shortlist (each card with its pre-computed facts)
+    and must return ONE verdict per candidate: {card_id, verdict: "move"|"keep",
+    direction?, target_list?, signals[]?, confidence?, reason, label_change?,
+    conflicts_placement?}. Every returned item carries an explicit verdict, so the
+    caller can detect any candidate the model omitted (never silently dropped). The
+    code gate (phases/reprioritize.py) then re-verifies signals and enforces the
+    confidence floor, exemptions, and cap on the "move" verdicts.
     """
     prompt = prompt_loader.load("reprioritize.md", {"repri_json": json.dumps(repri_payload)})
     text = call_llm(llm, prompt, system_prefix, max_tokens=max_tokens)
-    items = extract_items(parse_json(text), "moves")
-    valid, _ = validate_items(items, known_ids, ["card_id", "direction", "target_list"], ["card_id"])
+    items = extract_items(parse_json(text), "verdicts")
+    valid, _ = validate_items(items, known_ids, ["card_id", "verdict"], ["card_id"])
     return valid
 
 

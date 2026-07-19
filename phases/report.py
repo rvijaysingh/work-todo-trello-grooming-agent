@@ -490,6 +490,17 @@ def _section_health(lines, result, settings, stats, approval_rates, prev_stats, 
                  f"due_date_fix_mode={mode(settings.due_date_fix_mode)}  "
                  f"time_label_fix_mode={mode(settings.time_label_fix_mode)}  "
                  f"reprioritization_mode={mode(settings.reprioritization_mode)}")
+    # Reprioritization coverage — surfaces silent zeros (0 moves against N overflow)
+    # and any candidates the LLM left unverdicted, so under-action is visible.
+    tp = getattr(result, "today_plan", None) or {}
+    if tp:
+        rline = (f"Reprioritization: {tp.get('moved', 0)} moves against "
+                 f"{tp.get('overflow', 0)} overflow ({tp.get('proposed', 0)} proposed")
+        unv = tp.get("unverdicted", 0)
+        if unv:
+            rline += f", {unv} candidate(s) unverdicted (LLM omitted)"
+        rline += ")"
+        lines.append(rline)
     if result.rejections_recorded:
         lines.append(f"Rejections detected this run: {len(result.rejections_recorded)}")
     for note in notion_notes:

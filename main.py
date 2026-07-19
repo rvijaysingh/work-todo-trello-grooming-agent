@@ -212,11 +212,13 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     # Next Few Days targets apply to the already-cleaned board (design §5.4).
     from phases import reprioritize as repri
     repri_verdicts = judgments.get("reprioritization")
+    repri_unverdicted = 0
     if repri_verdicts is None:
-        repri_verdicts = _run_reprioritization_judgment(
+        repri_verdicts, repri_unverdicted = _run_reprioritization_judgment(
             llm, prompts, spine, board, mutator, settings, now_utc)
     tier2_repri = repri.run_reprioritization(db_path, mutator, board, repri_verdicts, settings,
-                                             spine, now_utc, now_iso, result)
+                                             spine, now_utc, now_iso, result,
+                                             unverdicted=repri_unverdicted)
 
     tier2_actions = _collect_tier2(board, settings, tier2_merges, tier2_archives, tier2_due,
                                    tier2_labels, tier2_inscope)
@@ -309,22 +311,39 @@ def _run_judgment(llm, prompts, spine, board, in_scope_cards, wide_cards, entity
 
 
 def _run_reprioritization_judgment(llm, prompts, spine, board, mutator, settings, now_utc):
-    """Reprioritization LLM pass — run AFTER execution so the candidate payload
-    reflects the cleaned board (post merge/archive/hygiene/recovery). Returns []
-    when the LLM is unavailable (tests inject verdicts directly instead)."""
+    """Reprioritization LLM pass — run AFTER execution so candidates reflect the
+    cleaned board (post merge/archive/hygiene/recovery).
+
+    Facts are pre-computed and the shortlist pre-ranked in Python (never a bulk
+    generator); the LLM is a per-candidate validator that MUST return a verdict for
+    every candidate. Returns (move_verdicts, unverdicted_count). Returns ([], 0)
+    when the LLM is unavailable (tests inject move verdicts directly instead)."""
     if llm is None or prompts is None:
-        return []
+        return [], 0
     from phases import reprioritize as repri
 
+    cands = repri.build_candidates(board, mutator, spine, settings, now_utc)
+    shortlist = cands["promote"] + cands["demote"]
+    if not shortlist:
+        return [], 0
     known_ids = board.all_card_ids()
     board_summary = f"{len(board.cards)} cards across {len(board.lists)} lists"
     prefix = judge.build_system_prefix(prompts, spine, board_summary, _RULES)
-    payload = repri.reprioritization_payload(board, mutator, spine, settings, now_utc)
-    if not payload.get("up_candidates") and not payload.get("down_candidates"):
-        return []
-    verdicts = judge.reprioritize_judge(llm, prompts, prefix, payload, known_ids)
-    logger.info("Reprioritization judge returned %d verdict(s)", len(verdicts))
-    return verdicts
+    # Per-candidate token budget so a large shortlist is never truncated (the same
+    # per-item-scaled budget that fixed the dead-due bulk-classification bug).
+    budget = min(8000, max(3000, 120 * len(shortlist)))
+    verdicts = judge.reprioritize_judge(llm, prompts, prefix, repri.judge_payload(cands),
+                                        known_ids, max_tokens=budget)
+    verdict_ids = {v.get("card_id") for v in verdicts}
+    unverdicted = [c for c in shortlist if c["id"] not in verdict_ids]
+    if unverdicted:
+        logger.warning("Reprioritization: %d/%d candidate(s) unverdicted by the LLM",
+                       len(unverdicted), len(shortlist))
+    moves = [v for v in verdicts
+             if v.get("verdict") == "move" and v.get("direction") and v.get("target_list")]
+    logger.info("Reprioritization judge: %d move, %d keep, %d unverdicted",
+                len(moves), len(verdicts) - len(moves), len(unverdicted))
+    return moves, len(unverdicted)
 
 
 def _merge_owner_archives(inscope_cards, llm_archives):

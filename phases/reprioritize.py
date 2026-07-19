@@ -228,26 +228,75 @@ def _apply_label_change_ids(label_ids: list[str], lc: dict, board) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Candidate payload for the LLM
+# Deterministic candidate pre-ranking (Python; the LLM never bulk-generates)
 # ---------------------------------------------------------------------------
 
-def reprioritization_payload(board, mutator, spine, settings, now_utc) -> dict:
-    """Build the deterministic candidate payload handed to the LLM.
+def _verified_up_signals(card, spine, settings, now_utc) -> list[str]:
+    """Code-verified promotion signals present on a card (empty if none)."""
+    sigs = []
+    if priority_label_role(card, settings) is not None:
+        sigs.append("priority_label")
+    if any(due_in_window(card, settings, now_utc, r) for r in ("today", "next_few_days", "this_week")):
+        sigs.append("due_in_window")
+    if matched_high_workstream(card, spine, settings) is not None:
+        sigs.append("workstream_high")
+    return sigs
 
-    Includes the current list sizes vs targets and, per candidate card, the set of
-    signals code has already verified (hints — the LLM restates which it relies on
-    and code re-verifies at the gate).
+
+def _suggested_up_target(board, card, spine, settings, now_utc) -> str:
+    """Destination list name a promotion should aim for, from the strongest signal."""
+    role = priority_label_role(card, settings)
+    if role is None:
+        for r in ("today", "next_few_days", "this_week"):
+            if due_in_window(card, settings, now_utc, r):
+                role = r
+                break
+    if role is None and matched_high_workstream(card, spine, settings) is not None:
+        role = "today"
+    lid = _repri_scope_ids(board, settings).get(role or "today")
+    lst = board.list_by_id(lid) if lid else None
+    return lst.name if lst else "Today"
+
+
+def _weakness(card, spine, settings, now_utc) -> tuple[float, dict]:
+    """Demotion-weakness score (higher == weaker) and its components.
+
+    Components mirror the design's weakness criteria: no "must do" time label, no
+    near due date, no High-priority workstream match, plus days since last activity
+    as a graded weight/tiebreaker.
+    """
+    no_mustdo = not any(is_time_based_label(n) for n in card.label_names)
+    days_until = _days_until_due(card, now_utc, settings)
+    no_near_due = not (card.due and days_until is not None
+                       and days_until <= settings.reprioritization_due_days.get("this_week", 7))
+    no_high_ws = matched_high_workstream(card, spine, settings) is None
+    days_inactive = g.days_since(card.last_activity, now_utc,
+                                 settings.tz_standard_offset, settings.tz_daylight_offset) or 0.0
+    score = (1.0 if no_mustdo else 0.0) + (1.0 if no_near_due else 0.0) + (1.0 if no_high_ws else 0.0)
+    score += min(max(days_inactive, 0.0) / 30.0, 2.0)  # up to +2 for very stale cards
+    return round(score, 3), {
+        "no_mustdo_label": no_mustdo, "no_near_due": no_near_due,
+        "no_high_workstream": no_high_ws, "days_inactive": round(max(days_inactive, 0.0), 1),
+    }
+
+
+def build_candidates(board, mutator, spine, settings, now_utc) -> dict:
+    """Pre-rank reprioritization candidates in Python (no LLM).
+
+    Promotions are pre-filtered to cards carrying at least one code-verified signal.
+    Demotions are limited, per over-target list, to the WEAKEST N cards where
+    N = min(2 * max_reprioritization_moves_per_run, overflow). Each candidate
+    carries its pre-computed facts so the LLM only validates per card.
     """
     roles = _repri_scope_ids(board, settings)
-    today_id = roles.get("today")
-    nfd_id = roles.get("next_few_days")
+    today_id, nfd_id = roles.get("today"), roles.get("next_few_days")
     eff = {c.id: effective_list_of(c, mutator) for c in board.cards if not c.closed}
     today_count = sum(1 for l in eff.values() if l == today_id)
     nfd_count = sum(1 for l in eff.values() if l == nfd_id)
-    over_today = today_count > settings.today_list_target
-    over_nfd = nfd_count > settings.next_few_days_target
+    overflow_today = max(0, today_count - settings.today_list_target)
+    overflow_nfd = max(0, nfd_count - settings.next_few_days_target)
 
-    up, down = [], []
+    promote, demote_by_role = [], {"today": [], "next_few_days": []}
     for c in board.cards:
         if c.closed:
             continue
@@ -256,33 +305,46 @@ def reprioritization_payload(board, mutator, spine, settings, now_utc) -> dict:
         if role is None or _moved_this_run(c.id, mutator):
             continue
         if role in ("inbox", "this_week", "next_few_days"):
-            plabel = priority_label_role(c, settings)
-            sigs = []
-            if plabel:
-                sigs.append("priority_label")
-            if any(due_in_window(c, settings, now_utc, r) for r in ("today", "next_few_days", "this_week")):
-                sigs.append("due_in_window")
-            if matched_high_workstream(c, spine, settings):
-                sigs.append("workstream_high")
+            sigs = _verified_up_signals(c, spine, settings, now_utc)
             if sigs:
-                up.append({"id": c.id, "name": c.name, "list": c.list_name,
-                           "available_signals": sigs,
-                           "suggested_target": plabel or "today"})
-        if (role == "today" and over_today) or (role == "next_few_days" and over_nfd):
-            down.append({"id": c.id, "name": c.name, "list": c.list_name,
-                         "weak": is_weak(c, spine, settings, now_utc),
-                         "last_activity": c.last_activity,
-                         "has_today_mustdo": any(_is_today_mustdo(n) for n in c.label_names)})
+                promote.append({"id": c.id, "name": c.name, "list": c.list_name,
+                                "verified_signals": sigs,
+                                "suggested_target": _suggested_up_target(board, c, spine, settings, now_utc)})
+        if (role == "today" and overflow_today) or (role == "next_few_days" and overflow_nfd):
+            score, comp = _weakness(c, spine, settings, now_utc)
+            demote_by_role[role].append({"id": c.id, "name": c.name, "list": c.list_name,
+                                         "role": role, "weakness_score": score, "weakness": comp,
+                                         "has_today_mustdo": any(_is_today_mustdo(n) for n in c.label_names)})
+
+    cap = settings.max_reprioritization_moves_per_run
+    demote = []
+    for role, overflow in (("today", overflow_today), ("next_few_days", overflow_nfd)):
+        ranked = sorted(demote_by_role[role], key=lambda d: d["weakness_score"], reverse=True)
+        demote.extend(ranked[: min(2 * cap, overflow)])
+
     logger.info(
-        "Reprioritization candidates: %d up, %d down (Today %d/%d over=%s, NFD %d/%d over=%s)",
-        len(up), len(down), today_count, settings.today_list_target, over_today,
-        nfd_count, settings.next_few_days_target, over_nfd,
+        "Reprioritization candidates: %d promote, %d demote shortlisted "
+        "(Today %d/%d overflow=%d, NFD %d/%d overflow=%d)",
+        len(promote), len(demote), today_count, settings.today_list_target, overflow_today,
+        nfd_count, settings.next_few_days_target, overflow_nfd,
     )
     return {
         "today_count": today_count, "today_target": settings.today_list_target,
         "nfd_count": nfd_count, "nfd_target": settings.next_few_days_target,
-        "over_today": over_today, "over_nfd": over_nfd,
-        "up_candidates": up, "down_candidates": down,
+        "overflow_today": overflow_today, "overflow_nfd": overflow_nfd,
+        "promote": promote, "demote": demote,
+    }
+
+
+def judge_payload(cands: dict) -> dict:
+    """Shape the pre-ranked candidates into the per-candidate judge payload."""
+    return {
+        "today_count": cands["today_count"], "today_target": cands["today_target"],
+        "overflow_today": cands["overflow_today"],
+        "nfd_count": cands["nfd_count"], "nfd_target": cands["nfd_target"],
+        "overflow_nfd": cands["overflow_nfd"],
+        "promote_candidates": cands["promote"],
+        "demote_candidates": cands["demote"],
     }
 
 
@@ -309,12 +371,15 @@ def _conflict_note(card, cur_list, direction, verdict, board, spine) -> str | No
 
 
 def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
-                         now_utc, now_iso, result):
-    """Execute / propose reprioritization moves; return Tier-2 action dicts.
+                         now_utc, now_iso, result, unverdicted=0):
+    """Execute / propose reprioritization MOVE verdicts; return Tier-2 action dicts.
 
-    Populates result.reprioritizations (executed moves, with verified signals) and
-    result.today_plan (counts vs targets for the report). Tier-2 actions are
-    returned for the caller to hand to generate_proposals with everything else.
+    `verdicts` are move verdicts only (keeps are filtered upstream). `unverdicted`
+    is the count of shortlisted candidates the LLM returned no verdict for — surfaced
+    in the report's Health stats so a silent zero is visible. Populates
+    result.reprioritizations (executed moves, with verified signals) and
+    result.today_plan (counts vs targets + overflow for the report). Tier-2 actions
+    are returned for the caller to hand to generate_proposals with everything else.
     """
     roles = _repri_scope_ids(board, settings)
     scope_ids = set(roles.values())
@@ -457,11 +522,17 @@ def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
         elif direction == "up" and target_role == "today":
             today_live += 1
 
+    overflow = (max(0, today_start - settings.today_list_target)
+                + max(0, nfd_start - settings.next_few_days_target))
     result.today_plan = {
         "today_count": today_start, "today_target": settings.today_list_target,
         "nfd_count": nfd_start, "nfd_target": settings.next_few_days_target,
         "moved": executed, "proposed": len(tier2),
+        "overflow": overflow, "unverdicted": unverdicted,
     }
     result.counters["reprioritizations"] = executed
-    logger.info("Reprioritization: %d moved, %d proposed", executed, len(tier2))
+    if unverdicted:
+        logger.warning("Reprioritization: %d candidate(s) left unverdicted by the LLM", unverdicted)
+    logger.info("Reprioritization: %d moved, %d proposed against %d overflow",
+                executed, len(tier2), overflow)
     return tier2

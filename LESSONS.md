@@ -2,6 +2,39 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## PATTERN: LLM bulk-generators silently return nothing (2nd occurrence)
+- **Symptom:** the reprioritization pass logged 22 promote / 138 demote candidates
+  on a board 35 cards over target (Today 50/15, Next Few Days 88/20), invoked the
+  judge, got a clean parseable LLM response (no truncation, no fallback) — and
+  produced **0 moves, 0 proposals**. Two rounds of prompt wording ("you SHOULD
+  demote", "don't hold back") changed nothing.
+- **Root cause — same shape as the dead-due bug below.** The judge was a *bulk
+  generator*: handed ~160 candidates and asked to emit a `moves` array, it was free
+  to return `[]`, and did. A model that must *originate* a list under a
+  placement-wins / "ignoring leaves everything where you put it" framing will
+  reliably choose the empty, safe output. This is the second time the pattern bit
+  us (first: the dead-due pass returned no classifications). **Treat it as a
+  standing rule, not a one-off:** an LLM that can answer "nothing" for the whole
+  batch eventually will.
+- **Fix — the documented principle: pre-compute in Python, make the LLM a
+  per-item validator, never a bulk generator.**
+  1. Deterministic pre-ranking in `reprioritize.build_candidates`: demotions are
+     limited to the weakest `min(2*cap, overflow)` cards per over-target list via a
+     Python `_weakness` score (no must-do label / no near due / no High workstream /
+     days idle); promotions are pre-filtered to cards with ≥1 code-verified signal.
+  2. The judge receives that shortlist with per-card facts and MUST return one
+     verdict per candidate — `move` or `keep` — so "do nothing" is an explicit,
+     per-card choice, not a silent empty array.
+  3. Candidates the model omits are counted and **surfaced in the report's Health
+     stats** ("Reprioritization: N moves against M overflow (… K unverdicted)"), so
+     a silent zero is visible instead of invisible. Per-item-scaled token budget
+     (120/candidate) prevents truncation.
+  The existing code gate (signal verification, confidence floor, exemptions, cap)
+  still filters the `move` verdicts unchanged. Regressions:
+  `test_reprioritize.py::test_over_target_yields_demotion_end_to_end`,
+  `::test_keep_everything_surfaces_silent_zero_in_health`,
+  `::test_unverdicted_candidates_surfaced_in_health`.
+
 ## Reprioritization promotion signals never fired: label-name mismatch
 - **Symptom:** the first live dry-run of the reprioritization pass proposed and
   executed zero P0/P1 promotions even though many Inbox/Next-Few-Days cards carry

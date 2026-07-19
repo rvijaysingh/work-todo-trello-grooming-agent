@@ -14,10 +14,12 @@ is bypassed by injecting reprioritization verdicts directly.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
 
+import main
 import settings as settings_mod
 import storage
 from phases import execute as ex
@@ -25,6 +27,26 @@ from phases import report as rep
 from phases import reprioritize as repri
 from phases import snapshot_diff as sd
 from spine import apply_notion_overrides, load_spine_from_dict
+
+
+class _Resp:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeLLM:
+    """Minimal LLM stand-in: every call returns the same canned JSON text."""
+
+    def __init__(self, text):
+        self._text = text
+
+    def call(self, **kwargs):
+        return _Resp(self._text)
+
+
+class FakePrompts:
+    def load(self, name, variables=None):
+        return "PROMPT"
 
 NOW = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
 OLD = "2026-07-01T12:00:00.000Z"       # ~19 days ago (not within the 48h window)
@@ -385,3 +407,72 @@ def test_at_a_glance_includes_today_plan_counts(cfg, db_path):
          "signals": ["priority_label"], "confidence": 88}], cfg())
     text = _report(result, board, cfg())
     assert "Today 15/15 (1 moved, 0 proposed)" in text or "Today " in text.split("At a glance")[1]
+
+
+# ── Deterministic pre-ranking (Python, no LLM) ─────────────────────────────
+
+def _over_target_today(n, target=15):
+    """A board with n weak Today cards (no labels, no due, stale) over `target`."""
+    cards = [_card(f"c{i}", f"Idle task {i}", "L_today",
+                   last=("2026-06-15T12:00:00.000Z" if i == 0 else "2026-07-01T12:00:00.000Z"))
+             for i in range(n)]
+    return _board(cards)
+
+
+def test_build_candidates_promotion_prefilter(cfg, db_path):
+    # Only the P0-labelled Inbox card carries a verified signal → only it shortlists.
+    board = _board([_card("p", "QA Hub task list", "L_inbox", labels=["P0 - High"]),
+                    _card("q", "Random note", "L_inbox")])
+    mut = ex.BoardMutator(None, dry_run=True)
+    cands = repri.build_candidates(board, mut, _spine(), cfg(), NOW)
+    ids = [c["id"] for c in cands["promote"]]
+    assert ids == ["p"] and "priority_label" in cands["promote"][0]["verified_signals"]
+
+
+def test_build_candidates_demote_shortlist_capped(cfg, db_path):
+    # 30 over target (15) with cap 3 → shortlist = min(2*3, overflow 15) = 6, weakest first.
+    board = _over_target_today(30)
+    mut = ex.BoardMutator(None, dry_run=True)
+    cands = repri.build_candidates(board, mut, _spine(), cfg(max_reprioritization_moves_per_run=3), NOW)
+    assert cands["overflow_today"] == 15
+    assert len(cands["demote"]) == 6
+    assert cands["demote"][0]["id"] == "c0"  # oldest/most-inactive ranks weakest-first
+    assert "weakness_score" in cands["demote"][0]
+
+
+# ── End-to-end through the real pipeline path (LLM verdict step mocked) ─────
+
+def _pipeline(board, settings, db_path, tmp_path, verdicts):
+    settings.report_file = str(tmp_path / "report.txt")
+    fake = FakeLLM(json.dumps({"verdicts": verdicts}))
+    return main.run_pipeline(board, settings, db_path, NOW, True, True,
+                             llm=fake, prompts=FakePrompts(), spine=_spine(), judgments={})
+
+
+def test_over_target_yields_demotion_end_to_end(cfg, db_path, tmp_path):
+    board = _over_target_today(30)
+    verdicts = ([{"card_id": "c0", "verdict": "move", "direction": "down",
+                  "target_list": "Next Few Days", "signals": ["weak"], "confidence": 85,
+                  "reason": "Weakest on Today: no labels, no due, 35 days idle."}]
+                + [{"card_id": f"c{i}", "verdict": "keep", "reason": "active"} for i in range(1, 30)])
+    result, text, _ = _pipeline(board, cfg(today_list_target=15), db_path, tmp_path, verdicts)
+    assert any(r["card_id"] == "c0" for r in result.reprioritizations)
+    assert "Mark Less Time-sensitive: move to Next Few Days" in text
+
+
+def test_keep_everything_surfaces_silent_zero_in_health(cfg, db_path, tmp_path):
+    board = _over_target_today(30)
+    verdicts = [{"card_id": f"c{i}", "verdict": "keep", "reason": "still active"} for i in range(30)]
+    result, text, _ = _pipeline(board, cfg(today_list_target=15), db_path, tmp_path, verdicts)
+    assert result.today_plan["moved"] == 0 and result.today_plan["overflow"] == 15
+    # Silent zero is now VISIBLE in Health stats.
+    assert "Reprioritization: 0 moves against 15 overflow" in text
+
+
+def test_unverdicted_candidates_surfaced_in_health(cfg, db_path, tmp_path):
+    board = _over_target_today(30)
+    # LLM returns verdicts for only 5 of the 15 shortlisted cards.
+    verdicts = [{"card_id": f"c{i}", "verdict": "keep", "reason": "x"} for i in range(5)]
+    result, text, _ = _pipeline(board, cfg(today_list_target=15), db_path, tmp_path, verdicts)
+    assert result.today_plan["unverdicted"] == 10
+    assert "10 candidate(s) unverdicted" in text

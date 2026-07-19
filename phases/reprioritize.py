@@ -322,6 +322,18 @@ def build_candidates(board, mutator, spine, settings, now_utc) -> dict:
         ranked = sorted(demote_by_role[role], key=lambda d: d["weakness_score"], reverse=True)
         demote.extend(ranked[: min(2 * cap, overflow)])
 
+    # Bound the promote shortlist too. With the spine loaded, workstream matches can
+    # make hundreds of cards signal-bearing; sending them all overflows the judge's
+    # token budget and truncates the whole response (every verdict then dropped).
+    # Only `cap` moves execute per run, so the strongest ~2*cap candidates suffice.
+    # Rank strongest first: an explicit P0/P1 label beats a due-window match beats a
+    # (looser) workstream-only match, then by number of signals.
+    def _promote_strength(c):
+        sigs = c["verified_signals"]
+        return ("priority_label" in sigs, "due_in_window" in sigs, len(sigs))
+    promote.sort(key=_promote_strength, reverse=True)
+    promote = promote[: min(2 * cap, len(promote))]
+
     logger.info(
         "Reprioritization candidates: %d promote, %d demote shortlisted "
         "(Today %d/%d overflow=%d, NFD %d/%d overflow=%d)",

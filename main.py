@@ -361,9 +361,10 @@ def _run_reprioritization_judgment(llm, prompts, spine, board, mutator, settings
     known_ids = board.all_card_ids()
     board_summary = f"{len(board.cards)} cards across {len(board.lists)} lists"
     prefix = judge.build_system_prefix(prompts, spine, board_summary, _RULES)
-    # Per-candidate token budget so a large shortlist is never truncated (the same
-    # per-item-scaled budget that fixed the dead-due bulk-classification bug).
-    budget = min(8000, max(3000, 120 * len(shortlist)))
+    # Per-candidate token budget so the shortlist is never truncated (the same
+    # per-item-scaled budget that fixed the dead-due bulk-classification bug). The
+    # shortlist is bounded by build_candidates (~6*cap), so the ceiling has headroom.
+    budget = min(12000, max(3000, 120 * len(shortlist)))
     verdicts = judge.reprioritize_judge(llm, prompts, prefix, repri.judge_payload(cands),
                                         known_ids, max_tokens=budget)
     verdict_ids = {v.get("card_id") for v in verdicts}

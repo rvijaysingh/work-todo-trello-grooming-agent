@@ -429,6 +429,27 @@ def test_build_candidates_promotion_prefilter(cfg, db_path):
     assert ids == ["p"] and "priority_label" in cands["promote"][0]["verified_signals"]
 
 
+def test_build_candidates_promote_shortlist_capped(cfg, db_path):
+    # 25 Inbox cards each with a P0 label → all carry a verified signal, but the
+    # promote shortlist is capped at 2*cap so a large signal-bearing set can't
+    # overflow the judge's token budget (the 124/124-unverdicted live failure).
+    cards = [_card(f"p{i}", f"Task {i}", "L_inbox", labels=["P0 - High"]) for i in range(25)]
+    board = _board(cards)
+    mut = ex.BoardMutator(None, dry_run=True)
+    cands = repri.build_candidates(board, mut, _spine(), cfg(max_reprioritization_moves_per_run=3), NOW)
+    assert len(cands["promote"]) == 6  # min(2*3, 25)
+    assert all("priority_label" in c["verified_signals"] for c in cands["promote"])
+
+
+def test_build_candidates_promote_ranks_strongest_first(cfg, db_path):
+    # A P0-labelled card outranks a workstream-only match: strongest signal first.
+    board = _board([_card("weak", "QA Hub pilot notes", "L_inbox"),
+                    _card("strong", "QA Hub task list", "L_inbox", labels=["P0 - High"])])
+    mut = ex.BoardMutator(None, dry_run=True)
+    cands = repri.build_candidates(board, mut, _spine(), cfg(), NOW)
+    assert cands["promote"][0]["id"] == "strong"  # P0 label ranks above workstream-only
+
+
 def test_build_candidates_demote_shortlist_capped(cfg, db_path):
     # 30 over target (15) with cap 3 → shortlist = min(2*3, overflow 15) = 6, weakest first.
     board = _over_target_today(30)

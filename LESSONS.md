@@ -2,6 +2,23 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Reprioritization promotion signals never fired: label-name mismatch
+- **Symptom:** the first live dry-run of the reprioritization pass proposed and
+  executed zero P0/P1 promotions even though many Inbox/Next-Few-Days cards carry
+  priority labels. The Today plan section rendered (Today 50/15) but no upward
+  moves keyed on a priority label.
+- **Root cause:** the spine's "Problem 5" prose names the labels `"P0. High"` and
+  `"P1"`, so `priority_labels` shipped with exactly those keys. The live Fira board
+  actually names them **`"P0 - High"`** and **`"P1 - Medium"`** (matching the
+  `.env` keys `fira_p0_high_label_id` / `fira_p1_medium_label_id`). Signal
+  verification is an exact `label_name in priority_labels` check, so the real
+  labels never matched — the promotion signal could never verify.
+- **Fix:** the `priority_labels` default now maps **both** spellings
+  (`"P0. High"`/`"P0 - High"` → today, `"P1"`/`"P1 - Medium"` → next_few_days).
+  Because `priority_labels` is config (never hardcoded), the mapping is auditable
+  and Vijay can adjust it if the board relabels. Lesson: verify signal keys against
+  the *live board's* label names, not the spec's prose spelling.
+
 ## Duplicates were archived as "redundant copies" instead of merged
 - **Symptom:** a run produced zero merges while three identical "Connect with Mac
   on IC-to-account mapping" cards surfaced as in-scope "no longer needed" archive

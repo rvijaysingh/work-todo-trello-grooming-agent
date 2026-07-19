@@ -151,7 +151,7 @@ cards More/Less Time-sensitive so Today and Next Few Days reflect real prioritie
 | `next_few_days_target` | int | `20` | `>= 0` | Target max cards on Next Few Days; demotions trigger only above this. |
 | `max_reprioritization_moves_per_run` | int | `10` | `>= 0` | Per-run cap on executed reprioritization moves (over-cap moves become proposals). |
 | `demotion_exempt_hours` | int | `48` | `>= 0` | **File-only.** A card placed/edited within this window is never demoted (automatically or by proposal). |
-| `priority_labels` | object | `{"P0. High": "today", "P1": "next_few_days"}` | `{label_name: role}` | **File-only.** Label names that are promotion signals and their destination role. |
+| `priority_labels` | object | `{"P0. High": "today", "P0 - High": "today", "P1": "next_few_days", "P1 - Medium": "next_few_days"}` | `{label_name: role}` | **File-only.** Label names that are promotion signals and their destination role. Includes both the spine's "P0. High"/"P1" spelling and the live board's "P0 - High"/"P1 - Medium" spelling. |
 | `reprioritization_due_days` | object | `{"today": 1, "next_few_days": 3, "this_week": 7}` | `{role: days}` | **File-only.** Due-in-window bands per destination role (an overdue date satisfies every band). |
 
 ### Blocking / similarity (Phase 2, deterministic, no LLM)

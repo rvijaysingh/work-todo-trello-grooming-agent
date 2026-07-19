@@ -322,7 +322,9 @@ def _run_reprioritization_judgment(llm, prompts, spine, board, mutator, settings
     payload = repri.reprioritization_payload(board, mutator, spine, settings, now_utc)
     if not payload.get("up_candidates") and not payload.get("down_candidates"):
         return []
-    return judge.reprioritize_judge(llm, prompts, prefix, payload, known_ids)
+    verdicts = judge.reprioritize_judge(llm, prompts, prefix, payload, known_ids)
+    logger.info("Reprioritization judge returned %d verdict(s)", len(verdicts))
+    return verdicts
 
 
 def _merge_owner_archives(inscope_cards, llm_archives):

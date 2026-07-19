@@ -273,6 +273,11 @@ def reprioritization_payload(board, mutator, spine, settings, now_utc) -> dict:
                          "weak": is_weak(c, spine, settings, now_utc),
                          "last_activity": c.last_activity,
                          "has_today_mustdo": any(_is_today_mustdo(n) for n in c.label_names)})
+    logger.info(
+        "Reprioritization candidates: %d up, %d down (Today %d/%d over=%s, NFD %d/%d over=%s)",
+        len(up), len(down), today_count, settings.today_list_target, over_today,
+        nfd_count, settings.next_few_days_target, over_nfd,
+    )
     return {
         "today_count": today_count, "today_target": settings.today_list_target,
         "nfd_count": nfd_count, "nfd_target": settings.next_few_days_target,

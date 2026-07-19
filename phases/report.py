@@ -188,6 +188,10 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     # Header + at-a-glance --------------------------------------------------
     lines.append(f"{REPORT_CARD_PREFIX} — {now_iso}")
     lines.append(f"Mode: {'DRY-RUN (no board changes)' if dry_run else 'LIVE'}")
+    if getattr(result, "spine_unreadable", False):
+        lines.append("")
+        lines.append("!!! SPINE UNREADABLE — archiving, label, date, and reprioritization "
+                     "passes skipped this run !!!")
     notion_notes = getattr(result, "notion_notes", []) or []
     if any("dry_run" in n for n in notion_notes):
         lines.append("Note: dry_run was set by the Notion 'Rules and thresholds' section.")

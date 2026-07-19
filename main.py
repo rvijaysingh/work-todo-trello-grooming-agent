@@ -119,12 +119,16 @@ def resolve_ids_or_fail(board: BoardView, settings) -> None:
 
 def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
                  llm=None, prompts=None, spine=None, trello=None, judgments=None,
-                 notion_notes=None):
+                 notion_notes=None, spine_ok=True):
     """Run phases 1–5 over an already-fetched board. Returns (result, report_text).
 
     judgments (optional): {'clusters': [...], 'hygiene': [...], 'recovery': [...]}
     lets tests inject LLM verdicts deterministically, bypassing the LLM calls.
     notion_notes (optional): report lines from applying spine "Rules" overrides.
+    spine_ok=False (spine read failed) runs in DEGRADED mode: the spine-dependent
+    passes — in-scope archiving, time-label disposition, dead-due date fixing, and
+    reprioritization — are skipped entirely; merges still run and Scratch recovery
+    is routed only to Inbox / Triage; a banner is shown and an alert is sent.
     """
     now_iso = now_utc.astimezone(timezone.utc).isoformat() if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc).isoformat()
     run_id = now_iso
@@ -180,6 +184,25 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     spine_terms = spine.all_terms() if spine else []
     inscope_archive_verdicts = judgments.get("inscope_archive", [])
     label_verdicts = judgments.get("labels", [])
+    stale_pairs = hyg["stale_labels"]
+
+    # DEGRADED mode: with no spine, the "no longer needed" test, the swap-vs-remove
+    # label decision, the still-matters due classification, and reprioritization all
+    # lose their grounding — skip them entirely rather than act on ungrounded LLM
+    # output. Merges (dedup, no spine needed) and renames still run; recovery is
+    # forced to Inbox / Triage (the safe, ambiguous-context default).
+    result.spine_unreadable = not spine_ok
+    if not spine_ok:
+        inscope_archive_verdicts = []
+        label_verdicts = []
+        stale_pairs = []
+        hygiene_verdicts = [v for v in hygiene_verdicts
+                            if v.get("new_name") and not v.get("clear_due") and not v.get("due_status")]
+        dead_due_ids = set()
+        recovery_verdicts = [
+            {"card_id": v.get("card_id"), "disposition": "inbox",
+             "reason": v.get("reason") or "Spine unreadable — routed to Inbox / Triage."}
+            for v in recovery_verdicts if v.get("card_id")]
 
     # Cards in any duplicate cluster are "being merged" — they get no other fix.
     merge_claimed = set()
@@ -203,17 +226,18 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     tier2_due = ex.execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, settings,
                                    now_utc, now_iso, result, dead_due_ids=dead_due_ids,
                                    spine_terms=spine_terms, skip_ids=claimed)
-    tier2_labels = ex.execute_label_dispositions(db_path, mutator, board, hyg["stale_labels"],
+    tier2_labels = ex.execute_label_dispositions(db_path, mutator, board, stale_pairs,
                                                  label_verdicts, settings, now_utc, now_iso, result,
                                                  skip_ids=claimed)
     tier2_archives = ex.execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_iso, result)
 
     # Reprioritization runs AFTER merges/archives/hygiene/recovery, so the Today /
-    # Next Few Days targets apply to the already-cleaned board (design §5.4).
+    # Next Few Days targets apply to the already-cleaned board (design §5.4). Skipped
+    # entirely in degraded mode (it reasons from the spine's priority/time-sensitivity).
     from phases import reprioritize as repri
-    repri_verdicts = judgments.get("reprioritization")
+    repri_verdicts = judgments.get("reprioritization") if spine_ok else []
     repri_unverdicted = 0
-    if repri_verdicts is None:
+    if spine_ok and repri_verdicts is None:
         repri_verdicts, repri_unverdicted = _run_reprioritization_judgment(
             llm, prompts, spine, board, mutator, settings, now_utc)
     tier2_repri = repri.run_reprioritization(db_path, mutator, board, repri_verdicts, settings,
@@ -536,11 +560,21 @@ def run(argv=None) -> int:
             return 3
 
         first_run = storage.latest_prior_run_id(settings.db_path, now_iso) is None
+        spine_ok = True
         try:
             spine = read_spine(notion, settings.spine_page_id)
-        except Exception as exc:  # spine read failure is non-fatal; degrade to no spine
-            logger.warning("Spine read failed (%s); continuing without spine", exc)
+        except Exception as exc:  # spine read failure → DEGRADED mode (not "no spine")
+            logger.error("Spine read failed (%s); running in DEGRADED mode — archiving, "
+                         "label, date, and reprioritization passes are skipped this run", exc)
             spine = None
+            spine_ok = False
+            send_alert(
+                f"[Agent Alert] {AGENT_NAME}: SPINE UNREADABLE",
+                f"The Notion spine ({settings.spine_page_id}) could not be read: {exc}\n\n"
+                "This run is DEGRADED: in-scope archiving, time-label, dead-due, and "
+                "reprioritization passes were skipped. Merges and Scratch recovery "
+                "(routed to Inbox / Triage) still ran. Fix the spine access and re-run.",
+                creds.gmail_sender, creds.gmail_password, creds.gmail_recipient or None)
 
         # Live config: spine "Rules and thresholds" overrides this run's settings.
         from spine import apply_notion_overrides
@@ -551,7 +585,7 @@ def run(argv=None) -> int:
 
         run_pipeline(board, settings, settings.db_path, now_utc, dry_run, first_run,
                      llm=llm, prompts=prompts, spine=spine, trello=trello,
-                     notion_notes=notion_notes)
+                     notion_notes=notion_notes, spine_ok=spine_ok)
         storage.record_success(settings.db_path, now_iso)
         logger.info("Run complete (dry_run=%s)", dry_run)
         return 0

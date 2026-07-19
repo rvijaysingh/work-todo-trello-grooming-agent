@@ -2,6 +2,29 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Spine read 404'd: Notion token key drifted from the .env layout
+- **Symptom:** every run logged "Spine read failed … continuing without spine";
+  the board was groomed with no workstream context (label swaps couldn't cite the
+  spine, reprioritization couldn't match workstreams). The Notion API returned 404
+  on the spine page.
+- **Root cause:** `.env.json` moved this agent's Notion token to a per-agent key
+  `notion.integration_token_work_trello_grooming_agent`, but `load_credentials`
+  still read the flat `notion.integration_token`, which held a **different**
+  integration's token that lacks access to the spine page → 404. Same failure
+  family as the rent-checker's flat Anthropic-key bug (CLAUDE.md): reading a
+  credential from a path the file no longer populates.
+- **Fix:** resolve the Notion token with explicit precedence — agent-specific key
+  first, then the shared `notion.integration_token`, then a loud startup failure
+  naming **both** paths — mirroring the nested `anthropic_api_keys.<agent>` lookup.
+  Log which KEY was selected at INFO (never the token value). Lesson: per-agent
+  credential keys must be read by their agent-specific path with a named fallback,
+  never a bare shared field. Regression: `test_credentials.py`.
+- **Compounding fix:** a spine-read failure was also being swallowed ("continue
+  without spine"), so the board was silently groomed on stale assumptions. A failed
+  spine read now runs in DEGRADED mode — skip the archive, time-label, dead-due, and
+  reprioritization passes; keep merges and Inbox-only recovery; show a report banner;
+  send an alert. Regression: `test_spine_failure.py`.
+
 ## PATTERN: LLM bulk-generators silently return nothing (2nd occurrence)
 - **Symptom:** the reprioritization pass logged 22 promote / 138 demote candidates
   on a board 35 cards over target (Today 50/15, Next Few Days 88/20), invoked the

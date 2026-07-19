@@ -138,6 +138,7 @@ class ExecutionResult:
     today_plan: dict = field(default_factory=dict)           # counts vs targets (report)
     expired_proposals: list = field(default_factory=list)
     reminder_created: bool = False
+    spine_unreadable: bool = False                           # spine read failed → degraded run
     notion_notes: list = field(default_factory=list)         # Notion Rules override notes
     notes: list = field(default_factory=list)
     counters: dict = field(default_factory=dict)

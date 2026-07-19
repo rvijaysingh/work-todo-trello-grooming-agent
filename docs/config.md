@@ -248,6 +248,7 @@ are documented here — never any secret values.
     "fira_p1_medium_label_id": "<...>"
   },
   "notion": {
+    "integration_token_work_trello_grooming_agent": "<...>",
     "integration_token": "<...>"
   },
   "anthropic_api_keys": {
@@ -261,7 +262,8 @@ are documented here — never any secret values.
 | `trello.api_key` | string | Trello REST auth (key) | Nested under `trello`. Owns the Fira board. |
 | `trello.token` | string | Trello REST auth (token) | Nested under `trello`. |
 | `trello.fira_todo_board_id` | string | Fira board id | Available for direct lookups; the agent still resolves scope by `board_shortlink` from `agent_config.json`. Sibling `fira_*_list_id` / `fira_*_label_id` keys exist for convenience but are not required by this agent. |
-| `notion.integration_token` | string | Reading the Notion spine page | Nested under `notion`. The spine page must be shared with this integration. |
+| `notion.integration_token_work_trello_grooming_agent` | string | Reading the Notion spine page (agent-specific) | Nested under `notion`. **Preferred** token, mirroring the `anthropic_api_keys.<agent>` per-agent pattern. |
+| `notion.integration_token` | string | Reading the Notion spine page (shared fallback) | Nested under `notion`. Used only when the agent-specific key above is absent. The spine page must be shared with whichever integration owns the resolved token. Startup fails naming **both** paths if neither is present. |
 | `gmail_sender` | string | Alerting sender (Gmail SMTP `smtp.gmail.com:587`) | Top-level. Per global CLAUDE.md alerting standard. |
 | `gmail_password` | string | Alerting SMTP auth (app password) | Top-level. Per global CLAUDE.md alerting standard. |
 | `ollama_endpoint` | string | Ollama fallback connection URL | Top-level. Consumed when the primary LLM is unavailable. |

@@ -411,10 +411,27 @@ def load_credentials(env_config_path: str) -> Credentials:
             )
         return str(cur)
 
+    def notion_token() -> str:
+        """Resolve the Notion token with precedence:
+        1) notion.integration_token_work_trello_grooming_agent (agent-specific),
+        2) notion.integration_token (shared fallback),
+        3) fail loudly naming both paths. Mirrors the nested anthropic_api_keys
+        lookup. Logs which KEY was chosen (never the value)."""
+        section = data.get("notion")
+        if isinstance(section, dict):
+            for key in ("integration_token_work_trello_grooming_agent", "integration_token"):
+                val = section.get(key)
+                if val not in (None, ""):
+                    logger.info("Using Notion token from notion.%s", key)
+                    return str(val)
+        raise CredentialsError(
+            "Missing Notion token: set 'notion.integration_token_work_trello_grooming_agent' "
+            f"or 'notion.integration_token' in {env_config_path}")
+
     creds = Credentials(
         trello_api_key=nested("trello", "api_key"),
         trello_token=nested("trello", "token"),
-        notion_token=nested("notion", "integration_token"),
+        notion_token=notion_token(),
         gmail_sender=nested("gmail_sender"),
         gmail_password=nested("gmail_password"),
         ollama_endpoint=nested("ollama_endpoint"),

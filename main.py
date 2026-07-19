@@ -225,6 +225,14 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     tier2_actions.extend(tier2_repri)
     ex.generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso, result)
 
+    # The reprioritization "proposed" count must reflect proposals that ACTUALLY
+    # opened (max_proposals_open can cap them), not the pre-cap intended count —
+    # otherwise the Today plan header disagrees with "Awaiting your decision".
+    if result.today_plan:
+        result.today_plan["proposed"] = sum(
+            1 for p in result.proposals_opened
+            if p.get("type") in ("reprioritize_up", "reprioritize_down"))
+
     # Phase 5 — report
     stats = _health_stats(board, settings, in_scope_cards, wide_cards, scratch_ids, processed)
     approval_rates = _approval_rates(db_path)

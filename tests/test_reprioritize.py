@@ -476,3 +476,18 @@ def test_unverdicted_candidates_surfaced_in_health(cfg, db_path, tmp_path):
     result, text, _ = _pipeline(board, cfg(today_list_target=15), db_path, tmp_path, verdicts)
     assert result.today_plan["unverdicted"] == 10
     assert "10 candidate(s) unverdicted" in text
+
+
+def test_today_plan_proposed_count_reflects_open_cap(cfg, db_path, tmp_path):
+    # 15 below-floor demotions all propose, but max_proposals_open caps how many
+    # actually open — the Today plan count must match the opened proposals, not the
+    # pre-cap intended 15.
+    board = _over_target_today(30)
+    verdicts = [{"card_id": f"c{i}", "verdict": "move", "direction": "down",
+                 "target_list": "Next Few Days", "signals": ["weak"], "confidence": 60,
+                 "reason": "weak"} for i in range(15)]
+    s = cfg(today_list_target=15, max_proposals_open=3)
+    result, text, _ = _pipeline(board, s, db_path, tmp_path, verdicts)
+    opened = sum(1 for p in result.proposals_opened if p.get("type") == "reprioritize_down")
+    assert opened == 3 and result.today_plan["proposed"] == 3
+    assert "3 proposed" in text and "15 proposed" not in text

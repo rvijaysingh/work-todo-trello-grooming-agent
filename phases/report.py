@@ -181,8 +181,15 @@ def _flush(lines: list[str], blocks: list[list[str]]) -> None:
 # ---------------------------------------------------------------------------
 
 def build_report(result, board, settings, now_iso, dry_run, first_run,
-                 stats=None, approval_rates=None, prev_stats=None) -> str:
-    """Assemble the Grooming Report text with the five canonical sections."""
+                 stats=None, approval_rates=None, prev_stats=None, card=False) -> str:
+    """Assemble the Grooming Report text.
+
+    card=False → the full report (five sections) written to the local file.
+    card=True → a CONDENSED report for the Trello card: header, At a glance, Today
+    plan, Still overdue, and Awaiting your decision in full; Recently archived /
+    Done automatically / Health stats collapsed to counts; plus a pointer to the
+    full report file. The result is byte-truncated to Trello's description limit.
+    """
     stats = stats or {}
     approval_rates = approval_rates or {}
     prev_stats = prev_stats or {}
@@ -228,6 +235,26 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     _section_today_plan(lines, result, board, settings, dry_run, limited)
     _section_still_overdue(lines, result, board, settings)
     _section_awaiting(lines, result, board, settings, now_iso)
+    if card:
+        # Collapse the bulky sections to counts; the full text is on disk.
+        mode = settings.mode_word
+        lines.append(f"== Recently archived ({len(result.recently_archived)}) == (see full report)")
+        lines.append("")
+        lines.append(f"== Done automatically ({n_auto}) == (see full report)")
+        lines.append("")
+        lines.append("== Health stats == (summary)")
+        rl = today_plan
+        if rl:
+            lines.append(f"Reprioritization: {rl.get('moved', 0)} moves against "
+                         f"{rl.get('overflow', 0)} overflow ({rl.get('proposed', 0)} proposed)")
+        lines.append(f"Modes: archive_mode={mode(settings.archive_mode)}  "
+                     f"due_date_fix_mode={mode(settings.due_date_fix_mode)}  "
+                     f"time_label_fix_mode={mode(settings.time_label_fix_mode)}  "
+                     f"reprioritization_mode={mode(settings.reprioritization_mode)}")
+        lines.append("")
+        lines.append(f"Full report: {settings.report_file}")
+        text = "\n".join(lines).rstrip("\n") + "\n"
+        return _byte_truncate(text, _TRELLO_DESC_LIMIT)
     _section_recently_archived(lines, result, board, settings, dry_run, limited)
     _section_done_automatically(lines, result, board, settings, dry_run, auto_entries, n_auto, limited)
     _section_health(lines, result, settings, stats, approval_rates, prev_stats, notion_notes)
@@ -541,27 +568,37 @@ def write_report_file(text: str, path: str) -> None:
     logger.info("Report written to %s", path)
 
 
-# Trello caps a card description at 16384 characters; a long report (many
-# proposals) exceeds it and the API returns 400. Truncate to a safe length — the
-# full report is always written to the local file regardless.
+# Trello caps a card description at 16384 BYTES (not characters) and 400s on
+# overflow. Leave margin. The full report is always on disk regardless.
 _TRELLO_DESC_LIMIT = 16000
-_TRUNCATION_NOTE = "\n\n…(report truncated to fit Trello; see the full report file logs/grooming_report.txt)"
+_TRUNCATION_NOTE = "\n\n…truncated — see the full report file"
 
 
-def publish_report_card(mutator, board, settings, text: str) -> None:
-    """Replace the Grooming Report card at the top of report_list.
+def _byte_truncate(text: str, limit_bytes: int) -> str:
+    """Truncate `text` so its UTF-8 encoding fits `limit_bytes`, without splitting a
+    multibyte character, appending a clear truncation marker."""
+    data = text.encode("utf-8")
+    if len(data) <= limit_bytes:
+        return text
+    note = _TRUNCATION_NOTE.encode("utf-8")
+    cut = max(0, limit_bytes - len(note))
+    return data[:cut].decode("utf-8", errors="ignore").rstrip() + _TRUNCATION_NOTE
 
-    Best-effort: a report-card write failure (e.g. an oversized description, a
-    transient API error) must never crash the run — the real board actions have
-    already been applied and the full report is on disk. The description is
-    truncated to Trello's limit before writing.
+
+def publish_report_card(mutator, board, settings, text: str) -> bool:
+    """Replace the Grooming Report card at the top of report_list. Returns whether
+    the card was published.
+
+    Best-effort: a report-card write failure (oversized description, transient API
+    error) must never crash a run whose real board actions already succeeded — the
+    full report is on disk. Text is byte-truncated to Trello's limit; the mutator
+    also sanitizes CRLF and rejected control chars.
     """
     report_list = board.list_by_name(settings.report_list)
     if report_list is None:
         logger.warning("report_list %r not found; skipping report card", settings.report_list)
-        return
-    if len(text) > _TRELLO_DESC_LIMIT:
-        text = text[: _TRELLO_DESC_LIMIT - len(_TRUNCATION_NOTE)] + _TRUNCATION_NOTE
+        return False
+    text = _byte_truncate(text, _TRELLO_DESC_LIMIT)
     existing = None
     for c in board.cards_in_list(report_list.id):
         if c.name.strip().lower().startswith(REPORT_CARD_PREFIX.lower()):
@@ -572,6 +609,8 @@ def publish_report_card(mutator, board, settings, text: str) -> None:
             mutator.set_description(existing.id, text)
         else:
             mutator.create_card(report_list.id, REPORT_CARD_PREFIX, text)
+        return True
     except Exception as exc:  # report card is cosmetic; never fail the run over it
         logger.error("Could not publish the Grooming Report card (%s); the full report is "
                      "in %s", exc, settings.report_file)
+        return False

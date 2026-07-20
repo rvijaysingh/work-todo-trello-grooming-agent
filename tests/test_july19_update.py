@@ -324,6 +324,76 @@ def test_report_card_truncated_and_best_effort(cfg):
     rep.publish_report_card(_RaiseMut(), board, cfg(), "short")     # must NOT raise
 
 
+# ── Trello text sanitizer (CRLF + control chars → 400 class) ───────────────
+
+def test_sanitize_card_text_normalizes_crlf_and_strips_controls():
+    assert ex.sanitize_card_text("a\r\nb\rc") == "a\nb\nc"
+    assert ex.sanitize_card_text("x\x00\x07\x1fy") == "xy"           # C0 controls stripped
+    assert ex.sanitize_card_text("keep\ttab\nand nl") == "keep\ttab\nand nl"  # tab/nl kept
+    assert ex.sanitize_card_text("emdash — ok") == "emdash — ok"     # unicode preserved
+    assert ex.sanitize_card_text(None) == ""
+
+
+def test_mutator_sanitizes_comment_text():
+    mut = ex.BoardMutator(None, dry_run=True)
+    mut.add_comment("c", "line1\r\nline2\x07end")
+    assert mut.log[-1]["text"] == "line1\nline2end"
+
+
+# ── Condensed report card fits Trello's byte limit ─────────────────────────
+
+def test_card_report_condensed_fits_and_summarizes(cfg):
+    result = ex.ExecutionResult()
+    result.run_mode = "limited_test"
+    result.today_plan = {"today_count": 50, "today_target": 15, "nfd_count": 80,
+                         "nfd_target": 20, "moved": 10, "proposed": 12, "overflow": 95,
+                         "unverdicted": 0}
+    for i in range(18):  # realistic (capped at max_proposals_open)
+        result.proposals_opened.append({
+            "proposal_id": i, "type": "reprioritize_up", "card_id": f"c{i}", "card_ids": [f"c{i}"],
+            "title": f"Proposal {i} " + "x" * 40, "action_desc": "Increase Time-Sensitivity",
+            "reason": "r" * 60, "confidence": 80, "dest_name": "Today"})
+    for i in range(40):  # bulky sections that must be summarized, not inlined
+        result.recently_archived.append({"card_id": f"a{i}", "name": "y" * 80, "reason": "z" * 80})
+        result.applied.append({"type": "rename", "card_id": f"r{i}", "new_name": "n" * 60, "real": True})
+    board = _board([_card("x", "old", "L_today")])
+    text = rep.build_report(result, board, cfg(), NOW.isoformat(), dry_run=False, first_run=False,
+                            stats={}, approval_rates={}, prev_stats={}, card=True)
+    assert len(text.encode("utf-8")) <= 16384                        # fits Trello's byte limit
+    assert "Full report:" in text                                    # pointer present
+    assert "== Awaiting your decision (18) ==" in text               # proposals in full
+    assert "== Recently archived (40) == (see full report)" in text  # summarized
+    assert "== Done automatically" in text and "(see full report)" in text
+
+
+def test_byte_truncate_respects_limit_and_marks():
+    huge = "— " * 20000  # multibyte em-dashes
+    out = rep._byte_truncate(huge, 16000)
+    assert len(out.encode("utf-8")) <= 16000 and out.endswith("truncated — see the full report file")
+    out.encode("utf-8")  # valid utf-8 (no split multibyte char)
+
+
+# ── Idempotency: crash-after-execute must not duplicate a proposal ─────────
+
+def test_open_proposal_not_duplicated_on_rerun(cfg, db_path):
+    board = _board([_card("c1", "Some card", "L_today")])
+    action = {"type": "inscope_archive", "card_ids": ["c1"], "anchor_card_id": "c1",
+              "confidence": 65, "reason": "delegated"}
+    # Run 1: open the proposal (records it + labels the card).
+    r1 = ex.ExecutionResult()
+    mut1 = ex.BoardMutator(_FakeTrello(), run_mode="live")
+    ex.generate_proposals(db_path, mut1, board, [action], cfg(), NOW.isoformat(), r1)
+    assert len(r1.proposals_opened) == 1
+    # Run 2 (post-crash re-run): the same action must NOT create a second proposal.
+    r2 = ex.ExecutionResult()
+    mut2 = ex.BoardMutator(_FakeTrello(), run_mode="live")
+    ex.generate_proposals(db_path, mut2, board, [action], cfg(), NOW.isoformat(), r2)
+    assert r2.proposals_opened == []
+    with storage.db_connection(db_path) as conn:
+        n = conn.execute("SELECT COUNT(*) AS n FROM proposals").fetchone()["n"]
+    assert n == 1  # exactly one proposal row, not two
+
+
 def test_health_stats_render_mode_words(cfg, db_path):
     result = ex.ExecutionResult()
     board = _board([_card("x", "old", "L_today")])

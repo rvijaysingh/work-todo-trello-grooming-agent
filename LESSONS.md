@@ -2,23 +2,42 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
-## Oversized Grooming Report card crashed the run after real writes
-- **Symptom:** the first limited_test run applied all its real board actions
-  (archives, label swaps, recoveries, ~20 proposals) and then crashed with a Trello
-  `400 Bad Request` on `create_card` when publishing the Grooming Report card —
+## Trello 400 class (CRLF + byte limits) — second agent bitten
+- **Symptom:** a limited_test run applied all its real board actions (archives,
+  label swaps, recoveries, ~20 proposals) and then crashed with a Trello
+  `400 Bad Request` on `POST /1/cards` when publishing the Grooming Report card —
   turning a successful run into a failure (no snapshot saved, failure counter bumped).
-- **Root cause:** Trello caps a card description at 16384 characters. A busy run
-  (81 reprioritization moves + many proposals) produced a 19,885-char report, and
-  `publish_report_card` sent it unbounded and un-guarded, so the API rejected it and
-  the exception propagated out of the whole pipeline — *after* the irreversible board
-  writes had already happened.
-- **Fix:** `publish_report_card` truncates the description to a safe 16000 chars
-  (the full report is always on disk at `logs/grooming_report.txt`) AND wraps the
-  write in try/except — the report card is cosmetic and must never fail a run whose
-  real actions already succeeded. Regression:
-  `test_july19_update.py::test_report_card_truncated_and_best_effort`. Lesson:
-  any board write that happens *after* the primary mutations (report card, summary
-  updates) must be best-effort and size-bounded.
+- **Root cause (cross-repo — the gmail-to-trello agent hit the same class):** Trello
+  rejects card bodies that (a) exceed the **16384-BYTE** description limit — a busy
+  run produced a 19,885-char report — and (b) contain bare control chars / `\r\n`
+  line endings. A character-count truncation is *not* enough: multibyte chars
+  (em-dash `—`, ellipsis `…` = 3 bytes each) mean 16k chars can still exceed 16k
+  bytes. The un-guarded write also let the exception propagate out of the whole
+  pipeline *after* the irreversible board writes.
+- **Fix:**
+  1. `execute.sanitize_card_text` normalizes `\r\n`/`\r` → `\n` and strips C0
+     controls (except tab/newline) + DEL; the `BoardMutator` applies it to **all**
+     card-bound text (comments, descriptions, card names).
+  2. The report **card** gets a CONDENSED render (`build_report(card=True)`: header,
+     At a glance, Today plan, Still overdue, Awaiting your decision in full;
+     Recently archived / Done automatically / Health stats collapsed to counts; plus
+     a `Full report: logs\grooming_report.txt` pointer), then **byte-aware**
+     truncation (`_byte_truncate`, no split multibyte char, `…truncated` marker).
+     The full report is always on disk.
+  3. `publish_report_card` is best-effort (try/except, returns published bool); a
+     failure logs + emails but the run counts as **success** when all pipeline
+     actions succeeded. Re-running is idempotent for the crash-after-execute case:
+     `generate_proposals` now skips any fingerprint with an already-**open** proposal
+     (the rejection ledger only covered rejected/expired ones).
+- **Consider:** move `sanitize_card_text` + the byte-truncation into
+  `agent-shared-library` so every agent that writes Trello cards inherits it (two
+  agents bitten now). Regressions:
+  `test_july19_update.py::{test_sanitize_card_text_normalizes_crlf_and_strips_controls,
+  test_card_report_condensed_fits_and_summarizes, test_byte_truncate_respects_limit_and_marks,
+  test_open_proposal_not_duplicated_on_rerun}`.
+- **Env note:** this session's bare `python` resolved to **3.14.3** while the project
+  targets **3.13**; always invoke `py -3.13` (…\Python313\python.exe) for tests and
+  runs. The suite is green on both, but 3.13 is the supported interpreter.
 
 ## Completed-workstream cards were promoted (report review, July 19)
 - **Symptom:** a "Sales Summit recap" card was promoted (Increase Time-Sensitivity)

@@ -274,7 +274,12 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
                                    stats=stats, approval_rates=approval_rates,
                                    prev_stats=prev_stats)
     rep.write_report_file(report_text, settings.report_file)
-    rep.publish_report_card(mutator, board, settings, report_text)
+    # The card gets a CONDENSED, byte-truncated report (Trello's 16KB limit); the
+    # publish is best-effort and never fails the run.
+    card_text = rep.build_report(result, board, settings, now_iso, dry_run, first_run,
+                                 stats=stats, approval_rates=approval_rates,
+                                 prev_stats=prev_stats, card=True)
+    result.report_card_published = rep.publish_report_card(mutator, board, settings, card_text)
     # Persist this run's health stats for next run's day-over-day deltas (a real
     # run only — a dry-run must never become the baseline the next run diffs).
     if not dry_run:
@@ -601,9 +606,19 @@ def run(argv=None) -> int:
         logger.info("Run mode: %s (file/Notion run_mode=%s, Notion dry_run=%s)",
                     effective_run_mode, settings.run_mode, dry_run_from_notion)
 
-        run_pipeline(board, settings, settings.db_path, now_utc, dry_run, first_run,
-                     llm=llm, prompts=prompts, spine=spine, trello=trello,
-                     notion_notes=notion_notes, spine_ok=spine_ok, run_mode=effective_run_mode)
+        result, _, _ = run_pipeline(
+            board, settings, settings.db_path, now_utc, dry_run, first_run,
+            llm=llm, prompts=prompts, spine=spine, trello=trello,
+            notion_notes=notion_notes, spine_ok=spine_ok, run_mode=effective_run_mode)
+        # A report-card publish failure is NOT a run failure — all pipeline actions
+        # already succeeded and the full report is on disk. Log + email, count success.
+        if not getattr(result, "report_card_published", True):
+            logger.error("Grooming Report card was not published; full report in %s",
+                          settings.report_file)
+            send_alert(f"[Agent Alert] {AGENT_NAME}: report card not published",
+                       f"All pipeline actions succeeded but the Grooming Report card could not "
+                       f"be written to Trello. Full report: {settings.report_file}",
+                       creds.gmail_sender, creds.gmail_password, creds.gmail_recipient or None)
         storage.record_success(settings.db_path, now_iso)
         logger.info("Run complete (dry_run=%s)", dry_run)
         return 0

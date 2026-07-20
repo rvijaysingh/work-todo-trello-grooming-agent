@@ -33,6 +33,22 @@ from vocab import (
 
 logger = logging.getLogger(__name__)
 
+# Trello's API rejects (400) card text containing bare control characters and is
+# picky about CRLF; the gmail-to-trello agent was bitten by the same 400 class.
+# Normalize to \n and strip C0 controls (except tab/newline) + DEL from ALL
+# card-bound text. TODO: promote this into agent-shared-library so every agent
+# inherits it (see LESSONS.md).
+_TRELLO_BAD_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize_card_text(text: str) -> str:
+    """Make text safe for a Trello card/comment body: \\n line endings, no bare
+    control chars that Trello's API rejects."""
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return _TRELLO_BAD_CTRL.sub("", text)
+
 # Words that mark an archive rationale as "this card duplicates another". Such
 # cards belong to the MERGE pipeline (precedence merge > archive): merge
 # consolidates every source card's text into a survivor, verified by string
@@ -113,6 +129,7 @@ class BoardMutator:
             self.trello.update_card(card_id, name=new_name)
 
     def set_description(self, card_id: str, desc: str) -> None:
+        desc = sanitize_card_text(desc)
         self._record("set_description", card_id=card_id, desc=desc)
         if not self.dry_run:
             self.trello.update_card(card_id, description=desc)
@@ -134,6 +151,7 @@ class BoardMutator:
             self.trello.update_card(card_id, label_ids=list(label_ids))
 
     def add_comment(self, card_id: str, text: str) -> None:
+        text = sanitize_card_text(text)
         self._record("add_comment", card_id=card_id, text=text)
         if not self.dry_run:
             self.trello.add_comment(card_id, text)
@@ -149,6 +167,8 @@ class BoardMutator:
             self.trello.update_card(card_id, closed=True)
 
     def create_card(self, list_id: str, name: str, description: str) -> dict:
+        name = sanitize_card_text(name)
+        description = sanitize_card_text(description)
         self._record("create_card", list_id=list_id, name=name)
         if not self.dry_run:
             return self.trello.create_card(list_id, name, description)
@@ -178,6 +198,7 @@ class ExecutionResult:
     spine_unreadable: bool = False                           # spine read failed → degraded run
     run_mode: str = "dry_run"                                # dry_run | limited_test | live
     limited_per_type: int = 2                                # real actions per type in limited_test
+    report_card_published: bool = True                       # False → card publish failed (non-fatal)
     notion_notes: list = field(default_factory=list)         # Notion Rules override notes
     notes: list = field(default_factory=list)
     counters: dict = field(default_factory=dict)
@@ -1008,6 +1029,10 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
     """
     proposed_id = board.label_id(settings.label_proposed)
     open_count = storage.count_open_proposals(db_path)
+    # Idempotency: never re-create a proposal that is already OPEN (the rejection
+    # ledger only covers rejected/expired ones). This makes a re-run after a
+    # crash-after-execute safe — the same action isn't proposed twice.
+    open_fps = {p.get("fingerprint") for p in storage.get_open_proposals(db_path)}
 
     for action in tier2_actions:
         if open_count >= settings.max_proposals_open:
@@ -1017,6 +1042,9 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
         fp = fingerprint(action["type"], card_ids, action.get("new_name"))
         if storage.is_rejected(db_path, fp):
             result.notes.append(f"Proposal suppressed (rejected before): {fp}")
+            continue
+        if fp in open_fps:
+            result.notes.append(f"Proposal already open; not duplicating: {fp}")
             continue
         anchor = action.get("anchor_card_id", card_ids[0])
         card = board.card_by_id(anchor)

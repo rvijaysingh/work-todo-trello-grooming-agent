@@ -541,18 +541,37 @@ def write_report_file(text: str, path: str) -> None:
     logger.info("Report written to %s", path)
 
 
+# Trello caps a card description at 16384 characters; a long report (many
+# proposals) exceeds it and the API returns 400. Truncate to a safe length — the
+# full report is always written to the local file regardless.
+_TRELLO_DESC_LIMIT = 16000
+_TRUNCATION_NOTE = "\n\n…(report truncated to fit Trello; see the full report file logs/grooming_report.txt)"
+
+
 def publish_report_card(mutator, board, settings, text: str) -> None:
-    """Replace the Grooming Report card at the top of report_list (dry-run: no-op writes)."""
+    """Replace the Grooming Report card at the top of report_list.
+
+    Best-effort: a report-card write failure (e.g. an oversized description, a
+    transient API error) must never crash the run — the real board actions have
+    already been applied and the full report is on disk. The description is
+    truncated to Trello's limit before writing.
+    """
     report_list = board.list_by_name(settings.report_list)
     if report_list is None:
         logger.warning("report_list %r not found; skipping report card", settings.report_list)
         return
+    if len(text) > _TRELLO_DESC_LIMIT:
+        text = text[: _TRELLO_DESC_LIMIT - len(_TRUNCATION_NOTE)] + _TRUNCATION_NOTE
     existing = None
     for c in board.cards_in_list(report_list.id):
         if c.name.strip().lower().startswith(REPORT_CARD_PREFIX.lower()):
             existing = c
             break
-    if existing is not None:
-        mutator.set_description(existing.id, text)
-    else:
-        mutator.create_card(report_list.id, REPORT_CARD_PREFIX, text)
+    try:
+        if existing is not None:
+            mutator.set_description(existing.id, text)
+        else:
+            mutator.create_card(report_list.id, REPORT_CARD_PREFIX, text)
+    except Exception as exc:  # report card is cosmetic; never fail the run over it
+        logger.error("Could not publish the Grooming Report card (%s); the full report is "
+                     "in %s", exc, settings.report_file)

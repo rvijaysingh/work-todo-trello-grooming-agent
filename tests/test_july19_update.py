@@ -305,6 +305,25 @@ def test_mode_word_rendering_in_notion_note(cfg):
     assert any("set to proposed" in n for n in notes) and not any("set to False" in n for n in notes)
 
 
+def test_report_card_truncated_and_best_effort(cfg):
+    board = _board([_card("x", "old", "L_today")])
+    captured = {}
+
+    class _CapMut:
+        def create_card(self, list_id, name, text):
+            captured["text"] = text
+            return {"id": "r"}
+
+    rep.publish_report_card(_CapMut(), board, cfg(), "y" * 25000)   # oversized
+    assert len(captured["text"]) <= 16000 and "truncated" in captured["text"]
+
+    class _RaiseMut:
+        def create_card(self, *a):
+            raise RuntimeError("400 Bad Request")
+
+    rep.publish_report_card(_RaiseMut(), board, cfg(), "short")     # must NOT raise
+
+
 def test_health_stats_render_mode_words(cfg, db_path):
     result = ex.ExecutionResult()
     board = _board([_card("x", "old", "L_today")])

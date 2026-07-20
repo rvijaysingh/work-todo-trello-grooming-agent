@@ -2,6 +2,24 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Oversized Grooming Report card crashed the run after real writes
+- **Symptom:** the first limited_test run applied all its real board actions
+  (archives, label swaps, recoveries, ~20 proposals) and then crashed with a Trello
+  `400 Bad Request` on `create_card` when publishing the Grooming Report card —
+  turning a successful run into a failure (no snapshot saved, failure counter bumped).
+- **Root cause:** Trello caps a card description at 16384 characters. A busy run
+  (81 reprioritization moves + many proposals) produced a 19,885-char report, and
+  `publish_report_card` sent it unbounded and un-guarded, so the API rejected it and
+  the exception propagated out of the whole pipeline — *after* the irreversible board
+  writes had already happened.
+- **Fix:** `publish_report_card` truncates the description to a safe 16000 chars
+  (the full report is always on disk at `logs/grooming_report.txt`) AND wraps the
+  write in try/except — the report card is cosmetic and must never fail a run whose
+  real actions already succeeded. Regression:
+  `test_july19_update.py::test_report_card_truncated_and_best_effort`. Lesson:
+  any board write that happens *after* the primary mutations (report card, summary
+  updates) must be best-effort and size-bounded.
+
 ## Completed-workstream cards were promoted (report review, July 19)
 - **Symptom:** a "Sales Summit recap" card was promoted (Increase Time-Sensitivity)
   even though the Sales Summit workstream is **Complete** on the spine — the exact

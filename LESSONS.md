@@ -2,6 +2,22 @@
 
 Operational findings from building and debugging the agent. Newest first.
 
+## Completed-workstream cards were promoted (report review, July 19)
+- **Symptom:** a "Sales Summit recap" card was promoted (Increase Time-Sensitivity)
+  even though the Sales Summit workstream is **Complete** on the spine — the exact
+  opposite of what a finished workstream should trigger.
+- **Root cause:** `matched_high_workstream` only checked for **Active** High/High
+  workstreams and nothing prevented promotion when a card matched a Complete / Done
+  / Paused workstream. The reprioritization pass had no "terminal workstream" veto,
+  so a promotion signal (a P0 label) carried the card upward regardless.
+- **Fix (code-enforced, not the LLM):** `signals.matched_terminal_workstream` +
+  `reprioritize.promotion_veto` block promotion for terminal-workstream matches,
+  high staleness, and reflection cards; terminal/stale cards route to a
+  `[Move to Archive]`/`[Move to Backlog]` proposal instead. Regression:
+  `test_july19_update.py::test_complete_workstream_never_promoted_routes_to_archive`.
+  Lesson: a promotion path must check the *disqualifiers* (workstream finished,
+  need already passed) in code, not rely on the LLM to infer them.
+
 ## Spine read 404'd: Notion token key drifted from the .env layout
 - **Symptom:** every run logged "Spine read failed … continuing without spine";
   the board was groomed with no workstream context (label swaps couldn't cite the

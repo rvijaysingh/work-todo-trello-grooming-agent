@@ -187,11 +187,21 @@ heuristic-flagged cards take priority.
 | `weekly_sweep_day` | string | `"sunday"` | one of `monday`…`sunday` (lowercase) | Day the full-board LLM name sweep runs (§2 wide track). |
 | `spine_review_day` | string | `"monday"` | one of `monday`…`sunday`, or `"off"` | On the first run on/after this weekday each week, create a "Review agent spine…" card at the top of Today (unless one is already open). `"off"` disables the reminder. |
 
+### Run mode (supersedes `dry_run`)
+
+| Parameter | Type | Default | Allowed / validation | Description |
+|---|---|---|---|---|
+| `run_mode` | string | `"dry_run"` | `dry_run` / `limited_test` / `live` | Governs board writes and **supersedes `dry_run`** (a bare `dry_run: true` maps to `dry_run`; `false` to `live`). `dry_run`: zero writes. `limited_test`: for each action type (merge/archive/recover/rename/due/label/increase/decrease) only the top `limited_test_actions_per_type` highest-confidence actions execute for real; the rest are simulated ("would"). Proposals and infra writes are always real. `live`: all real. Notion-recognized. The CLI `--dry-run` still forces `dry_run`. |
+| `limited_test_actions_per_type` | int | `2` | `>= 0` | Real actions per action type in `limited_test`. Notion-recognized. |
+| `staleness_high_days` | int | `30` | `>= 0` | **File-only.** Age (from source-meeting/created date) at which `staleness_likelihood` is `high` (one-time asks halve it). High staleness vetoes promotion. |
+| `staleness_medium_days` | int | `14` | `>= 0` | **File-only.** Age at which staleness is `medium`. |
+| `backlog_list_prefix` | string | `"Backlog"` | non-empty | **File-only.** Lists whose name starts with this are topic backlog lists (`[Move to Backlog]` targets). |
+
 ### Runtime and operations
 
 | Parameter | Type | Default | Allowed / validation | Description |
 |---|---|---|---|---|
-| `dry_run` | bool | `true` | `true` / `false` | Ships `true`. When true, the full pipeline runs but zero board mutations occur (§6); overridable by `--dry-run`. |
+| `dry_run` | bool | `true` | `true` / `false` | Legacy flag, **superseded by `run_mode`**. When `run_mode` is unset, `dry_run: true` maps to run_mode `dry_run`. `--dry-run` always forces dry-run. |
 | `auto_pause_after_failures` | int | `3` | `> 0` | Consecutive failed runs after which the agent auto-pauses (§3). |
 | `spine_page_id` | string | `"3966c55b25638155a69dfdb1421d5d3e"` | non-empty; must be a readable Notion page | Notion context spine read at run start. |
 | `entity_keywords_seed` | array\<string> | see example | may be empty; lowercase strings | Seed entity keywords for blocking/clustering. At runtime, person names from the Notion spine **People** section are appended to this set before blocking runs. |

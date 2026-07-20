@@ -592,13 +592,14 @@ def run(argv=None) -> int:
         if dry_run_from_notion:
             logger.info("dry_run set to true by the Notion Rules section")
 
-        # run_mode governs execution; --dry-run and a Notion dry_run always force
-        # dry_run regardless of run_mode.
-        effective_run_mode = settings.run_mode
-        if args.dry_run or dry_run_from_notion:
-            effective_run_mode = "dry_run"
+        # run_mode governs execution and SUPERSEDES the dry_run flag (per the spine),
+        # including a Notion dry_run:true — settings.run_mode already reflects any
+        # Notion run_mode override. Only the CLI --dry-run forces dry-run (a safety
+        # override the operator asks for explicitly).
+        effective_run_mode = "dry_run" if args.dry_run else settings.run_mode
         dry_run = effective_run_mode == "dry_run"
-        logger.info("Run mode: %s", effective_run_mode)
+        logger.info("Run mode: %s (file/Notion run_mode=%s, Notion dry_run=%s)",
+                    effective_run_mode, settings.run_mode, dry_run_from_notion)
 
         run_pipeline(board, settings, settings.db_path, now_utc, dry_run, first_run,
                      llm=llm, prompts=prompts, spine=spine, trello=trello,

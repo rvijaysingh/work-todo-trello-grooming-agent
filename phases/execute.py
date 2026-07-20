@@ -813,6 +813,11 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
         card = board.card_by_id(cid)
         if card is None or card.list_id not in in_scope:
             continue
+        # Notes rule: never archive reflection / coaching / career-development cards.
+        import signals as _sig
+        if _sig.is_reflection_card(card, settings):
+            result.notes.append(f"In-scope archive skipped (reflection/coaching card): {cid}")
+            continue
         action = {"type": "inscope_archive", "card_ids": [cid], "anchor_card_id": cid,
                   "confidence": v.get("confidence"), "borderline": v.get("borderline"),
                   "reason": v.get("reason", "No longer needed.")}

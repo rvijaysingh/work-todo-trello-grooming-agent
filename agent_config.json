@@ -56,6 +56,11 @@
   "spine_review_day": "monday",
 
   "dry_run": true,
+  "run_mode": "limited_test",
+  "limited_test_actions_per_type": 2,
+  "staleness_high_days": 30,
+  "staleness_medium_days": 14,
+  "backlog_list_prefix": "Backlog",
   "auto_pause_after_failures": 3,
   "spine_page_id": "3966c55b25638155a69dfdb1421d5d3e",
   "entity_keywords_seed": [

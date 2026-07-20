@@ -35,10 +35,23 @@ from __future__ import annotations
 import logging
 
 import guardrails as g
+import signals as sig
 import storage
 from guardrails import fingerprint, is_time_based_label, normalize_tokens
 from phases import execute as ex
-from vocab import ACTION_MARK_LESS, ACTION_MARK_MORE
+from signals import (
+    SATISFYING_DOWN,
+    SATISFYING_UP,
+    SIG_DUE,
+    SIG_IMPLIED,
+    SIG_LABEL,
+    SIG_NO_URGENCY,
+    SIG_PEOPLE,
+    SIG_STALE,
+    SIG_WORKSTREAM,
+    canonical_signal,
+)
+from vocab import ACTION_DECREASE, ACTION_INCREASE, three_bullet
 
 logger = logging.getLogger(__name__)
 
@@ -178,18 +191,107 @@ def is_weak(card, spine, settings, now_utc) -> bool:
     return True
 
 
-def verify_signal(sig: str, card, spine, settings, now_utc, target_role: str) -> bool:
-    """Verify one claimed signal against real card/spine data."""
-    s = (sig or "").lower()
-    if s in ("priority_label", "p0_label", "p1_label", "p0", "p1"):
+def _priority_label_name(card, settings) -> str | None:
+    for name in card.label_names:
+        if name in settings.priority_labels:
+            return name
+    return None
+
+
+def verify_signal(name: str, card, spine, settings, now_utc, target_role: str) -> bool:
+    """Verify one claimed SATISFYING signal against real card/spine data.
+
+    Only code-verifiable satisfying signals return True here; the modifier signals
+    (implied_task_urgency, staleness_likelihood) are not satisfying and return False.
+    """
+    n = canonical_signal(name)
+    if n == SIG_LABEL:
         return priority_label_role(card, settings) is not None
-    if s in ("due_in_window", "due", "due_date"):
+    if n == SIG_DUE:
         return due_in_window(card, settings, now_utc, target_role)
-    if s in ("workstream_high", "workstream", "workstream_match"):
+    if n == SIG_WORKSTREAM:
         return matched_high_workstream(card, spine, settings) is not None
-    if s in ("weak", "weakness"):
+    if n == SIG_PEOPLE:
+        return sig.matched_priority_person(card, spine) is not None
+    if n == SIG_NO_URGENCY:
         return is_weak(card, spine, settings, now_utc)
     return False
+
+
+def signal_value(name: str, card, spine, settings, now_utc, target_role: str) -> str | None:
+    """Human-readable value for a code-verified signal (for the comment/report)."""
+    n = canonical_signal(name)
+    if n == SIG_LABEL:
+        return _priority_label_name(card, settings)
+    if n == SIG_DUE:
+        due_dt = g.parse_utc(card.due)
+        if due_dt is None:
+            return None
+        loc = g._local(due_dt, settings.tz_standard_offset, settings.tz_daylight_offset)
+        return f"due {loc.month}/{loc.day} matches '{_target_list_name(settings, target_role)}'"
+    if n == SIG_WORKSTREAM:
+        w = matched_high_workstream(card, spine, settings)
+        return w.name if w else None
+    if n == SIG_PEOPLE:
+        return sig.matched_priority_person(card, spine)
+    if n == SIG_NO_URGENCY:
+        return _no_urgency_value(card, spine, settings, now_utc)
+    if n == SIG_STALE:
+        level, basis = sig.staleness_level(card, now_utc, settings)
+        return f"{level} — {basis}"
+    return None
+
+
+def _target_list_name(settings, target_role: str | None) -> str:
+    names = {"today": "Today", "next_few_days": "Next Few Days",
+             "this_week": "This Week", "inbox": "Inbox / Triage"}
+    return names.get(target_role or "", target_role or "")
+
+
+def _comment_signals(claimed, verdict, card, spine, settings, now_utc, target_role) -> list[tuple]:
+    """(name, value) pairs for the comment/report, computed from code where possible.
+
+    implied_task_urgency is not code-verifiable, so its value comes from the LLM
+    verdict (signal_values map or implied_value), defaulting to 'asserted'.
+    """
+    llm_vals = verdict.get("signal_values") or {}
+    pairs = []
+    for s in claimed:
+        val = signal_value(s, card, spine, settings, now_utc, target_role)
+        if val is None:
+            if s == SIG_IMPLIED:
+                val = verdict.get("implied_value") or llm_vals.get(s) or "asserted"
+            else:
+                val = llm_vals.get(s) or "n/a"
+        pairs.append((s, val))
+    return pairs
+
+
+def _no_urgency_value(card, spine, settings, now_utc) -> str:
+    missing = []
+    if not any(is_time_based_label(n) for n in card.label_names):
+        missing.append("no must-do label")
+    if matched_high_workstream(card, spine, settings) is None:
+        missing.append("no workstream/people match")
+    days_idle = g.days_since(card.last_activity, now_utc,
+                             settings.tz_standard_offset, settings.tz_daylight_offset) or 0.0
+    return ", ".join(missing) + f", {int(max(days_idle, 0))} days idle"
+
+
+def promotion_veto(card, spine, settings, now_utc) -> str | None:
+    """Code-enforced reasons a card must NOT be promoted (or None).
+
+    Returns 'terminal_workstream', 'high_staleness', or 'reflection'. The caller
+    routes these to the archive/backlog path instead of promoting.
+    """
+    if sig.is_reflection_card(card, settings):
+        return "reflection"
+    if sig.matched_terminal_workstream(card, spine) is not None:
+        return "terminal_workstream"
+    level, _ = sig.staleness_level(card, now_utc, settings)
+    if level == "high":
+        return "high_staleness"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -231,16 +333,29 @@ def _apply_label_change_ids(label_ids: list[str], lc: dict, board) -> list[str]:
 # Deterministic candidate pre-ranking (Python; the LLM never bulk-generates)
 # ---------------------------------------------------------------------------
 
-def _verified_up_signals(card, spine, settings, now_utc) -> list[str]:
-    """Code-verified promotion signals present on a card (empty if none)."""
-    sigs = []
+def _verified_up_signals(card, spine, settings, now_utc) -> list[dict]:
+    """Code-verified promotion signals present on a card, each with its value."""
+    out = []
     if priority_label_role(card, settings) is not None:
-        sigs.append("priority_label")
+        out.append({"name": SIG_LABEL, "value": _priority_label_name(card, settings)})
     if any(due_in_window(card, settings, now_utc, r) for r in ("today", "next_few_days", "this_week")):
-        sigs.append("due_in_window")
-    if matched_high_workstream(card, spine, settings) is not None:
-        sigs.append("workstream_high")
-    return sigs
+        out.append({"name": SIG_DUE,
+                    "value": signal_value(SIG_DUE, card, spine, settings, now_utc,
+                                          _best_due_role(card, settings, now_utc))})
+    w = matched_high_workstream(card, spine, settings)
+    if w is not None:
+        out.append({"name": SIG_WORKSTREAM, "value": w.name})
+    person = sig.matched_priority_person(card, spine)
+    if person is not None:
+        out.append({"name": SIG_PEOPLE, "value": person})
+    return out
+
+
+def _best_due_role(card, settings, now_utc) -> str:
+    for r in ("today", "next_few_days", "this_week"):
+        if due_in_window(card, settings, now_utc, r):
+            return r
+    return "today"
 
 
 def _suggested_up_target(board, card, spine, settings, now_utc) -> str:
@@ -296,7 +411,7 @@ def build_candidates(board, mutator, spine, settings, now_utc) -> dict:
     overflow_today = max(0, today_count - settings.today_list_target)
     overflow_nfd = max(0, nfd_count - settings.next_few_days_target)
 
-    promote, demote_by_role = [], {"today": [], "next_few_days": []}
+    promote, demote_by_role, route = [], {"today": [], "next_few_days": []}, []
     for c in board.cards:
         if c.closed:
             continue
@@ -307,9 +422,13 @@ def build_candidates(board, mutator, spine, settings, now_utc) -> dict:
         if role in ("inbox", "this_week", "next_few_days"):
             sigs = _verified_up_signals(c, spine, settings, now_utc)
             if sigs:
-                promote.append({"id": c.id, "name": c.name, "list": c.list_name,
-                                "verified_signals": sigs,
-                                "suggested_target": _suggested_up_target(board, c, spine, settings, now_utc)})
+                veto = promotion_veto(c, spine, settings, now_utc)
+                if veto is None:
+                    promote.append({"id": c.id, "name": c.name, "list": c.list_name,
+                                    "verified_signals": sigs,
+                                    "suggested_target": _suggested_up_target(board, c, spine, settings, now_utc)})
+                elif veto != "reflection":  # reflection cards are left in place
+                    route.append(_route_action(board, c, spine, settings, veto, now_utc))
         if (role == "today" and overflow_today) or (role == "next_few_days" and overflow_nfd):
             score, comp = _weakness(c, spine, settings, now_utc)
             demote_by_role[role].append({"id": c.id, "name": c.name, "list": c.list_name,
@@ -344,8 +463,65 @@ def build_candidates(board, mutator, spine, settings, now_utc) -> dict:
         "today_count": today_count, "today_target": settings.today_list_target,
         "nfd_count": nfd_count, "nfd_target": settings.next_few_days_target,
         "overflow_today": overflow_today, "overflow_nfd": overflow_nfd,
-        "promote": promote, "demote": demote,
+        "promote": promote, "demote": demote, "route": route,
     }
+
+
+# ---------------------------------------------------------------------------
+# Staleness/terminal routing → [Move to Archive] / [Move to Backlog] proposals
+# ---------------------------------------------------------------------------
+
+def _backlog_target(board, card, spine, settings) -> tuple[str | None, str, bool]:
+    """Resolve a Move-to-Backlog destination.
+
+    Returns (existing_list_name | None, topic, suggest_create). A backlog list is
+    any list whose name starts with backlog_list_prefix; a match shares a token
+    with the card's topic (its matched workstream, else its first strong keyword).
+    """
+    ws = matched_workstream_any(card, spine)
+    topic = ws.name if ws else next(
+        (k for k in settings.entity_keywords_seed if k in (card.name or "").lower()),
+        (card.name or "General").split()[0] if card.name else "General")
+    prefix = settings.backlog_list_prefix.lower()
+    ttoks = normalize_tokens(topic)
+    for l in board.lists:
+        if l.closed or not l.name.lower().startswith(prefix):
+            continue
+        if normalize_tokens(l.name) & ttoks:
+            return l.name, topic, False
+    return None, topic, True
+
+
+def _strategically_relevant(card, spine) -> bool:
+    ws = matched_workstream_any(card, spine)
+    if ws is not None and ws.status.lower() == "active":
+        return True
+    return sig.matched_priority_person(card, spine) is not None
+
+
+def _route_action(board, card, spine, settings, veto: str, now_utc) -> dict:
+    """Build the archive/backlog PROPOSAL for a promotion-vetoed card."""
+    level, basis = sig.staleness_level(card, now_utc, settings)
+    sigs = [(SIG_STALE, f"{level} — {basis}")]
+    if veto == "terminal_workstream":
+        w = sig.matched_terminal_workstream(card, spine)
+        sigs.append((SIG_WORKSTREAM, f"{w.name} ({w.status})" if w else "terminal workstream"))
+        return {"type": "inscope_archive", "card_ids": [card.id], "anchor_card_id": card.id,
+                "confidence": settings.automatic_action_confidence, "signals": sigs,
+                "reason": f"Workstream {w.status if w else 'Complete/Done/Paused'} — no longer needed."}
+    # high staleness
+    if _strategically_relevant(card, spine):
+        dest, topic, suggest = _backlog_target(board, card, spine, settings)
+        person = sig.matched_priority_person(card, spine)
+        if person:
+            sigs.append((SIG_PEOPLE, person))
+        return {"type": "backlog", "card_ids": [card.id], "anchor_card_id": card.id,
+                "confidence": settings.automatic_action_confidence, "signals": sigs,
+                "dest_name": dest, "topic": topic, "suggest_create": suggest,
+                "reason": f"Stale but strategically relevant ({topic}); park in a topic backlog."}
+    return {"type": "inscope_archive", "card_ids": [card.id], "anchor_card_id": card.id,
+            "confidence": settings.automatic_action_confidence, "signals": sigs,
+            "reason": "High staleness, no strategic relevance — no longer needed."}
 
 
 def judge_payload(cands: dict) -> dict:
@@ -439,6 +615,15 @@ def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
             result.notes.append(f"Reprioritization skipped (not a downward move): {cid}")
             continue
 
+        # CODE-ENFORCED PROMOTION VETO: high staleness, a Complete/Done/Paused
+        # workstream match, or a reflection card is NEVER promoted — it routes to
+        # the archive/backlog path (proposals emitted from build_candidates.route).
+        if direction == "up":
+            veto = promotion_veto(card, spine, settings, now_utc)
+            if veto is not None:
+                result.notes.append(f"Promotion vetoed ({veto}): {cid}")
+                continue
+
         # Downward moves only from an over-target list (live counts).
         if direction == "down":
             if origin_role == "today" and today_live <= settings.today_list_target:
@@ -468,45 +653,51 @@ def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
             result.notes.append(f"Reprioritization suppressed (rejected before): {cid}")
             continue
 
-        # --- AUTOMATIC GATE ------------------------------------------------
-        claimed = list(v.get("signals", []) or [])
-        verified = [s for s in claimed if verify_signal(s, card, spine, settings, now_utc, target_role)]
-        all_verified = len(claimed) > 0 and len(verified) == len(claimed)
+        # --- AUTOMATIC GATE (category-aware) -------------------------------
+        # Only code-verifiable SATISFYING signals count toward the "≥1 verified"
+        # requirement and toward the "all claimed must verify" rule. Modifiers
+        # (implied_task_urgency — not code-checkable; staleness — a veto) never
+        # satisfy on their own and never invalidate the automatic path. So
+        # implied_task_urgency alone can never auto-execute a move.
+        claimed = [canonical_signal(s) for s in (v.get("signals") or [])]
+        satisfying = SATISFYING_UP if direction == "up" else SATISFYING_DOWN
+        verified = [s for s in claimed if s in satisfying
+                    and verify_signal(s, card, spine, settings, now_utc, target_role)]
+        unverified = [s for s in claimed if s in satisfying
+                      and not verify_signal(s, card, spine, settings, now_utc, target_role)]
+        all_ok = len(verified) >= 1 and len(unverified) == 0
         try:
             conf = int(v.get("confidence", 0) or 0)
         except (TypeError, ValueError):
             conf = 0
-        auto = (settings.reprioritization_mode and all_verified
+        auto = (settings.reprioritization_mode and all_ok
                 and conf >= settings.time_reprioritization_confidence)
         if auto and executed >= settings.max_reprioritization_moves_per_run:
             auto = False  # cap binds → downgrade to a proposal
             result.notes.append(f"Reprioritization over cap; proposing instead: {cid}")
 
         dest_name = board.list_by_id(dest_id).name if board.list_by_id(dest_id) else target_role
+        origin_name = board.list_by_id(cur_list).name if board.list_by_id(cur_list) else origin_role
         conflict = _conflict_note(card, cur_list, direction, v, board, spine)
         reason = v.get("reason") or ("Weakest card on an over-target list."
                                      if direction == "down" else "Signals indicate higher time-sensitivity.")
+        sig_pairs = _comment_signals(claimed, v, card, spine, settings, now_utc, target_role)
+        from_to = f"from '{origin_name}' to '{dest_name}' card list"
 
         if not auto:
             tier2.append({
                 "type": atype, "card_ids": [cid], "anchor_card_id": cid,
                 "confidence": conf, "reason": reason,
                 "dest_name": dest_name, "target_list": dest_name,
-                "conflict_note": conflict,
+                "conflict_note": conflict, "signals": sig_pairs, "from_to": from_to,
             })
             continue
 
-        # --- Execute (Tier 1) ----------------------------------------------
-        action_phrase = ACTION_MARK_MORE if direction == "up" else ACTION_MARK_LESS
-        parts = []
-        if conflict:
-            parts.append(conflict)
-        parts.append(f"{action_phrase}: move to {dest_name}.")
-        parts.append(f"Reason: {reason.rstrip('.')}.")
-        parts.append(f"Confidence: {conf}%.")
-        if conflict:
-            parts.append("Reject if your placement stands.")
-        mutator.add_comment(cid, " ".join(parts))
+        # --- Execute (Tier 1) — 3-bullet comment ---------------------------
+        action_label = ACTION_INCREASE if direction == "up" else ACTION_DECREASE
+        rationale = reason + (" Reject if your placement stands." if conflict else "")
+        mutator.add_comment(cid, three_bullet(sig_pairs, action_label, from_to,
+                                              rationale, conf, prefix=conflict or ""))
         mutator.move_card(cid, dest_id, position="top")
 
         label_ids = _apply_label_change_ids(list(card.label_ids), v.get("label_change") or {}, board)
@@ -523,7 +714,8 @@ def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
                                "direction": direction})
         result.reprioritizations.append({
             "card_id": cid, "name": card.name, "direction": direction, "dest": dest_name,
-            "verified_signals": verified, "confidence": conf, "reason": reason})
+            "verified_signals": verified, "confidence": conf, "reason": reason,
+            "signals": sig_pairs})
         executed += 1
         eff[cid] = dest_id
         if direction == "down":
@@ -533,6 +725,21 @@ def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
                 nfd_live -= 1
         elif direction == "up" and target_role == "today":
             today_live += 1
+
+    # Route promotion-vetoed, signal-bearing cards to [Move to Archive] / [Move to
+    # Backlog] PROPOSALS (staleness/terminal-workstream veto → archive-or-backlog
+    # evaluation, per the spine). Reflection cards are left in place.
+    for c in board.cards:
+        if c.closed:
+            continue
+        role = role_by_id.get(eff.get(c.id))
+        if role not in ("inbox", "this_week", "next_few_days") or _moved_this_run(c.id, mutator):
+            continue
+        if not _verified_up_signals(c, spine, settings, now_utc):
+            continue
+        veto = promotion_veto(c, spine, settings, now_utc)
+        if veto and veto != "reflection":
+            tier2.append(_route_action(board, c, spine, settings, veto, now_utc))
 
     overflow = (max(0, today_start - settings.today_list_target)
                 + max(0, nfd_start - settings.next_few_days_target))

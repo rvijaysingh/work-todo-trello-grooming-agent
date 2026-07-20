@@ -65,7 +65,7 @@ def test_recovery_route_to_today_when_spine_supports(board, settings, db_path):
                                    [{"card_id": "rec_s71_1", "disposition": "today"}])
     today = board.list_by_name("Today").id
     assert any(e["card_id"] == "rec_s71_1" and e["target_list_id"] == today for e in _ops(mut, "move_card"))
-    assert any("Recovered from" in e["text"] for e in _ops(mut, "add_comment"))
+    assert any("[Recover From Scratch]" in e["text"] for e in _ops(mut, "add_comment"))
 
 
 def test_recovery_today_cap_demotes_overflow_to_nfd(board, settings, db_path):
@@ -106,7 +106,7 @@ def test_recovery_archive_auto_when_confident(board, settings, db_path):
     assert storage.archive_entry_ts(db_path, "rec_s71_1") == NOW_ISO
     assert any(a["card_id"] == "rec_s71_1" for a in result.recently_archived)
     # Wording: moved into the Agent Archive list (not deletion, not yet Trello-archived).
-    assert any(ex.archive_list_wording(settings) in e["text"] for e in _ops(mut, "add_comment"))
+    assert any("[Move to Archive]" in e["text"] for e in _ops(mut, "add_comment"))
     assert any("Agent Archive list" in a["note"] for a in result.recently_archived)
 
 
@@ -127,7 +127,8 @@ def test_recovery_archive_proposed_when_flag_off(board, make_settings, db_path):
 def test_recovery_routed_card_gets_origin_comment(board, settings, db_path):
     mut, _, _ = _run_recovery(board, settings, db_path,
                               [{"card_id": "rec_s71_1", "disposition": "next_few_days"}])
-    assert any("Recovered from Scratch 7-1" in e["text"] for e in _ops(mut, "add_comment"))
+    assert any("[Recover From Scratch]" in e["text"] and "Scratch 7-1" in e["text"]
+               for e in _ops(mut, "add_comment"))
 
 
 def test_recovery_respects_max_recoveries_cap(board, make_settings, db_path):

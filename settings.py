@@ -49,6 +49,17 @@ def _mode_to_bool(v, default=None):
     return default
 
 
+_RUN_MODES = ("dry_run", "limited_test", "live")
+
+
+def _resolve_run_mode(data: dict) -> str:
+    """Resolve the effective run_mode. `run_mode` supersedes `dry_run` when present;
+    otherwise a `dry_run: true` maps to run_mode 'dry_run' and false to 'live'."""
+    if "run_mode" in data and data["run_mode"] not in (None, ""):
+        return str(data["run_mode"]).strip().lower()
+    return "dry_run" if bool(data.get("dry_run", True)) else "live"
+
+
 class SettingsError(ValueError):
     """Raised when agent_config.json is missing or has an invalid field."""
 
@@ -117,6 +128,20 @@ class AgentSettings:
     # Operational (not in config schema; sensible defaults, overridable in JSON)
     db_path: str = "state.db"
     report_file: str = "logs/grooming_report.txt"
+
+    # Run mode (supersedes dry_run when set) and limited-live-test controls.
+    run_mode: str = "dry_run"                 # "dry_run" | "limited_test" | "live"
+    limited_test_actions_per_type: int = 2
+    # Staleness (file-only; drives the promotion veto). Ages in local days.
+    staleness_high_days: int = 30
+    staleness_medium_days: int = 14
+    # Backlog list matching (file-only): lists whose name starts with this prefix.
+    backlog_list_prefix: str = "Backlog"
+
+    @property
+    def is_dry_run(self) -> bool:
+        """True when the run performs zero board writes (run_mode == 'dry_run')."""
+        return self.run_mode == "dry_run"
 
     @property
     def comparison_scope_lists(self) -> list[str]:
@@ -290,6 +315,11 @@ def load_settings(agent_config_path: str) -> AgentSettings:
             log_level=str(data.get("log_level", "INFO")).upper(),
             db_path=str(data.get("db_path", "state.db")),
             report_file=str(data.get("report_file", "logs/grooming_report.txt")),
+            run_mode=_resolve_run_mode(data),
+            limited_test_actions_per_type=int(data.get("limited_test_actions_per_type", 2)),
+            staleness_high_days=int(data.get("staleness_high_days", 30)),
+            staleness_medium_days=int(data.get("staleness_medium_days", 14)),
+            backlog_list_prefix=str(data.get("backlog_list_prefix", "Backlog")),
         )
     except (TypeError, ValueError) as exc:
         raise SettingsError(f"Invalid field type in agent_config.json: {exc}") from exc
@@ -371,6 +401,10 @@ def _validate_settings(s: AgentSettings) -> None:
             raise SettingsError(f"local_tz_offsets.{field_name} must satisfy -24 < x < 24")
     if s.log_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise SettingsError("log_level must be one of DEBUG, INFO, WARNING, ERROR")
+    if s.run_mode not in _RUN_MODES:
+        raise SettingsError(f"run_mode must be one of {_RUN_MODES}")
+    if s.limited_test_actions_per_type < 0:
+        raise SettingsError("limited_test_actions_per_type must be >= 0")
 
 
 # ---------------------------------------------------------------------------

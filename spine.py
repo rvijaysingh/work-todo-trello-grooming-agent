@@ -42,6 +42,19 @@ _SECTION_ALIASES = {
 # wording; "Done"/"Winding down" are the older bullet-format values.
 _DONE_STATUSES = frozenset({"done", "winding down", "complete", "completed"})
 
+# Statuses that mean a workstream is finished/parked for the promotion veto: a
+# card matching one of these is NEVER promoted (it routes to the archive path).
+_TERMINAL_STATUSES = frozenset({"done", "complete", "completed", "paused"})
+
+# A People-section entry is "priority-raising" when its context flags it so (the
+# spine writes "more important and time-sensitive" for Logan/Alex/Hunter/etc.).
+import re as _re
+_PRIORITY_CUE_RE = _re.compile(r"more important|time.?sensitiv|priority[- ]?rais|priority", _re.IGNORECASE)
+
+
+def _person_priority_from_text(*texts) -> bool:
+    return any(_PRIORITY_CUE_RE.search(t or "") for t in texts)
+
 
 @dataclass
 class Workstream:
@@ -58,6 +71,7 @@ class Person:
     name: str
     role: str = ""
     context: str = ""
+    priority: bool = False          # People-section "priority-raising" flag
 
 
 @dataclass
@@ -97,6 +111,14 @@ class SpineData:
     def done_workstream_names(self) -> list[str]:
         return [w.name for w in self.workstreams if w.status.lower() in _DONE_STATUSES]
 
+    def terminal_workstream_names(self) -> list[str]:
+        """Workstreams that are Done/Complete/Paused — a match NEVER promotes."""
+        return [w.name for w in self.workstreams if w.status.lower() in _TERMINAL_STATUSES]
+
+    def priority_person_names(self) -> list[str]:
+        """People flagged as priority-raising in the People section."""
+        return [p.name for p in self.people if p.priority and p.name]
+
     def all_terms(self) -> list[str]:
         """Every spine text fragment, for LLM-name grounding."""
         terms: list[str] = []
@@ -125,6 +147,8 @@ def load_spine_from_dict(d: dict) -> SpineData:
             name=str(p.get("name", "")),
             role=str(p.get("role", "")),
             context=str(p.get("context", "")),
+            priority=bool(p.get("priority")) or _person_priority_from_text(
+                str(p.get("role", "")), str(p.get("context", ""))),
         )
         for p in d.get("people", [])
     ]
@@ -346,7 +370,8 @@ def _consume_line(section: str | None, text: str, spine: SpineData) -> None:
             priority=priority, time_sensitive=time_sensitive))
     elif section == "people":
         name, role, context = _split_entry(text)
-        spine.people.append(Person(name=name, role=role, context=context))
+        spine.people.append(Person(name=name, role=role, context=context,
+                                   priority=_person_priority_from_text(role, context, text)))
     elif section == "notes":
         spine.notes.append(text)
     elif section == "rules":
@@ -508,6 +533,8 @@ _OVERRIDE_TYPES: dict[str, str] = {
     "today_list_target": "int",
     "next_few_days_target": "int",
     "max_reprioritization_moves_per_run": "int",
+    "run_mode": "run_mode",
+    "limited_test_actions_per_type": "int",
     # NOTE: demotion_exempt_hours, priority_labels, reprioritization_due_days are
     # file-only config (not exposed as Notion Rules keys) — the spine states the
     # 48h placement rule as prose, so keeping them off the parser avoids drift.
@@ -552,6 +579,9 @@ def _coerce(typ: str, raw: str):
             if low in _MODE_FALSE:
                 return False
             return None
+        if typ == "run_mode":
+            low = token.lower()
+            return low if low in ("dry_run", "limited_test", "live") else None
         if typ == "weekday":
             return token.lower() if token.lower() in _WEEKDAYS else None
         if typ == "review_day":
@@ -599,7 +629,9 @@ def apply_notion_overrides(settings, spine) -> tuple[list[str], bool]:
             setattr(settings, key, prev)
             notes.append(f"Notion Rules: '{key}'={val} rejected by validation ({exc}); ignored")
             continue
-        notes.append(f"Notion Rules: '{key}' set to {val} (from spine)")
+        # Render mode booleans as their config words (item 5: never True/False).
+        shown = ("automatic" if val else "proposed") if _OVERRIDE_TYPES[key] == "mode" else val
+        notes.append(f"Notion Rules: '{key}' set to {shown} (from spine)")
         if key == "dry_run" and val is True:
             dry_run_from_notion = True
     logger.info("Applied %d Notion Rules note(s)", len(notes))

@@ -32,9 +32,10 @@ from datetime import timedelta
 import guardrails as g
 from vocab import (
     ACTION_ARCHIVE,
+    ACTION_BACKLOG,
+    ACTION_DECREASE,
     ACTION_FIX_DUE,
-    ACTION_MARK_LESS,
-    ACTION_MARK_MORE,
+    ACTION_INCREASE,
     ACTION_MERGE,
     ACTION_RECOVER,
     ACTION_RENAME,
@@ -257,8 +258,9 @@ def _section_today_plan(lines, result, board, settings, dry_run):
         for i, m in enumerate(executed, 1):
             card = _card(board, m.get("card_id"))
             title = m.get("name") or (card.name if card else m.get("card_id"))
-            action = ACTION_MARK_MORE if m.get("direction") == "up" else ACTION_MARK_LESS
-            sigs = ", ".join(m.get("verified_signals", [])) or "n/a"
+            action = ACTION_INCREASE if m.get("direction") == "up" else ACTION_DECREASE
+            pairs = m.get("signals") or [(n, "") for n in m.get("verified_signals", [])]
+            sigs = " ".join(f"({j}) {n}: {v}" for j, (n, v) in enumerate(pairs, 1)) or "n/a"
             conf = m.get("confidence")
             conf_s = f" Confidence: {int(conf)}%." if conf is not None else ""
             block = [_entry_header(f"#{i}", title, card.due if card else None, settings),
@@ -273,7 +275,7 @@ def _section_today_plan(lines, result, board, settings, dry_run):
     if repri_props:
         lines.append("-- Open reprioritization proposals (answer under 'Awaiting your decision') --")
         for p in repri_props:
-            action = ACTION_MARK_MORE if p.get("type") == "reprioritize_up" else ACTION_MARK_LESS
+            action = ACTION_INCREASE if p.get("type") == "reprioritize_up" else ACTION_DECREASE
             conf = p.get("confidence")
             conf_s = f" (Confidence {int(conf)}%)" if conf is not None else ""
             lines.append(f"- {p.get('title', p.get('card_id'))} — {action}: "
@@ -453,9 +455,9 @@ def _auto_phrase(a, board, settings) -> str:
         return (f"{ACTION_RECOVER} — recover from {a.get('origin', '?')} and merge into "
                 f"'{surv.name if surv else ''}'")
     if t == "reprioritize_up":
-        return f"{ACTION_MARK_MORE} — move to {a.get('dest', '?')}"
+        return f"{ACTION_INCREASE} — move to {a.get('dest', '?')}"
     if t == "reprioritize_down":
-        return f"{ACTION_MARK_LESS} — move to {a.get('dest', '?')}"
+        return f"{ACTION_DECREASE} — move to {a.get('dest', '?')}"
     if t and t.startswith("approved_"):
         return f"execute approved proposal ({t[len('approved_'):]})"
     return t or "review"

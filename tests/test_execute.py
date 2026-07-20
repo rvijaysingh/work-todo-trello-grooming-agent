@@ -151,7 +151,8 @@ def test_rename_carries_change_comment_with_confidence(board, settings, db_path,
                             "confidence": 88, "reason": "Split multi-part title"}],
                           flagged=["name_pipe"])
     comment = [e for e in _ops(mut, "add_comment") if e["card_id"] == "name_pipe"][0]["text"]
-    assert "Renamed from" in comment and "Confidence: 88%" in comment
+    assert "[Rename Card]" in comment and "to 'Call Dana and prep agenda'" in comment
+    assert "Confidence: 88%" in comment
 
 
 # ── Stale time-based label auto-removal (auto-mode default) ─────────────────
@@ -166,7 +167,8 @@ def test_stale_label_auto_removed_tier1(board, settings, db_path, now_utc):
     assert tier2 == []
     stripped = [e for e in _ops(mut, "set_labels") if e["card_id"] == "stale_label"]
     assert stripped and "LB_t" not in stripped[0]["label_ids"]
-    assert any("Removed stale label" in e["text"] for e in _ops(mut, "add_comment"))
+    assert any("[Update Time Label]" in e["text"] and "remove '1. Today (must do)'" in e["text"]
+               for e in _ops(mut, "add_comment"))
 
 
 def test_stale_label_proposed_when_flag_off(board, make_settings, db_path, now_utc):
@@ -193,7 +195,9 @@ def test_stale_label_swapped_when_active_time_sensitive(board, settings, db_path
     stripped = [e for e in _ops(mut, "set_labels") if e["card_id"] == "stale_label"]
     assert stripped and "LB_t" not in stripped[0]["label_ids"] and "LB_n" in stripped[0]["label_ids"]
     assert any(a["type"] == "label_swap" for a in result.applied)
-    assert any("Swapped stale label" in e["text"] for e in _ops(mut, "add_comment"))
+    assert any("[Update Time Label]" in e["text"]
+               and "from '1. Today (must do)' to '2. Next Few Days (must do)'" in e["text"]
+               for e in _ops(mut, "add_comment"))
 
 
 def test_stale_label_archived_card_skipped(board, settings, db_path, now_utc):

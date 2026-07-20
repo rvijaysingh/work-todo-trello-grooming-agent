@@ -45,7 +45,8 @@ def test_no_longer_matters_cleared_auto_with_comment(board, settings, db_path, n
                                 "confidence": 90, "reason": "Event passed"}])
     assert any(e["card_id"] == "dead_due" for e in _ops(mut, "clear_due"))
     comment = [e for e in _ops(mut, "add_comment") if e["card_id"] == "dead_due"][0]["text"]
-    assert "Old due date was" in comment and "Confidence: 90%" in comment
+    assert "old due date was" in comment and "Confidence: 90%" in comment
+    assert "[Fix Due Date]" in comment
     assert any(a["type"] == "dead_due_clear" for a in result.applied)
 
 

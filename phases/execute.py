@@ -20,12 +20,14 @@ import storage
 from guardrails import assign_tier, fingerprint
 from vocab import (
     ACTION_ARCHIVE,
+    ACTION_BACKLOG,
     ACTION_FIX_DUE,
     ACTION_MERGE,
     ACTION_RECOVER,
     ACTION_RENAME,
     ACTION_TIME_LABEL,
     action_phrase,
+    three_bullet,
 )
 
 logger = logging.getLogger(__name__)
@@ -314,15 +316,11 @@ def compose_survivor_desc(survivor, losers) -> str:
 def _merge_audit_comment(survivor, losers, verdict, settings) -> str:
     """The audit-trail comment (links + confidence) written to the survivor."""
     src = ", ".join(f"{l.name} ({l.url or l.id})" for l in losers)
-    line = (f"{ACTION_MERGE}: Merged in {len(losers)} duplicate(s): {src}. "
-            f"Sources {archive_list_wording(settings)}.")
-    reason = verdict.get("reason")
-    if reason:
-        line += f" {reason}"
-    conf = verdict.get("confidence")
-    if conf is not None:
-        line += f" Confidence: {int(conf)}%."
-    return line
+    reason = verdict.get("reason") or "Same task captured as multiple cards."
+    return three_bullet(
+        [("duplicate_of", src)], ACTION_MERGE,
+        f"→ survivor holds all text; sources {archive_list_wording(settings)}",
+        f"Merged in {len(losers)} duplicate(s). {reason}", verdict.get("confidence"))
 
 
 def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -> bool:
@@ -377,10 +375,10 @@ def execute_merge(db_path, mutator, board, verdict, settings, now_iso, result) -
 
     # Move losers to the TOP of the Agent Archive list with a link back.
     for loser in losers:
-        mutator.add_comment(
-            loser.id,
-            f"{ACTION_MERGE}: Merged into {survivor.url or survivor.id}; "
-            f"{archive_list_wording(settings)}.")
+        mutator.add_comment(loser.id, _action_comment(
+            ACTION_MERGE, [("survivor", survivor.name)],
+            f"Merged into {survivor.url or survivor.id}; {archive_list_wording(settings)}.",
+            from_to=f"to '{settings.archive_list_name}'"))
         mutator.move_card(loser.id, archive_list.id, position="top")
         if not mutator.dry_run:
             storage.add_archive_entry(db_path, loser.id, now_iso)
@@ -507,7 +505,10 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         old_name = card.name
         _apply_rename(mutator, board, card, v["new_name"], v.get("new_desc"), auto_id, settings)
         mutator.add_comment(card.id, _action_comment(
-            ACTION_RENAME, f"Renamed from '{old_name}' to '{v['new_name']}'", v))
+            ACTION_RENAME, [("name_quality", f"unclear title '{old_name}'")],
+            v.get("reason") or "Rewritten per the card naming standard.",
+            confidence=v.get("confidence"),
+            from_to=f"from '{old_name}' to '{v['new_name']}'"))
         if not mutator.dry_run:
             storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
                                   {"new_name": v["new_name"], "original_name": old_name}, "success")
@@ -562,13 +563,20 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
         if redate:
             mutator.add_comment(cid, _action_comment(
                 ACTION_FIX_DUE,
-                f"Old due date was {card.due}; set new due {new_due} (from written source)", v))
+                [("due_status", f"dead — old due date was {card.due}"),
+                 ("written_date", f"{new_due} (from card/spine text)")],
+                v.get("reason") or "Re-dated from a written source.",
+                confidence=v.get("confidence"),
+                from_to=f"from {card.due} to {new_due}"))
             mutator.set_due(cid, new_due)
             atype = "due_redate"
         else:
             mutator.add_comment(cid, _action_comment(
                 ACTION_FIX_DUE,
-                f"Old due date was {card.due}; cleared it (long past, nothing left to do)", v))
+                [("due_status", f"dead — old due date was {card.due}"),
+                 ("written_date", "none found")],
+                v.get("reason") or "Cleared a long-past due date (nothing left to do).",
+                confidence=v.get("confidence")))
             mutator.clear_due(cid)
             atype = "dead_due_clear"
         # Date fixes are label-neutral by design: they never add or remove labels
@@ -594,23 +602,25 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
     return tier2_due
 
 
-def _action_comment(action: str, detail: str, verdict: dict) -> str:
-    """Format an auto-action comment in the canonical vocabulary layout:
+def _action_comment(action_label: str, signals, rationale: str,
+                    confidence=None, from_to: str | None = None) -> str:
+    """Format an auto-action comment in the canonical 3-bullet layout (vocab.three_bullet).
 
-        '<Action>: <detail>. Reason: <one line>. Confidence: NN%.'
-
-    `action` is a phrase from vocab.py; `detail` is the specific change. The
-    reason is appended (unless already contained in the detail) and the
-    confidence last.
+    signals: ordered [(name, value)] facts that drove the action (bullet 1).
+    action_label: a phrase from vocab.py, rendered "[<label>]" (bullet 2).
+    from_to: optional from/to clause on bullet 2.
+    rationale + confidence: bullet 3.
     """
-    line = f"{action}: {detail.rstrip('.')}."
-    reason = verdict.get("reason")
-    if reason and reason.rstrip(".").lower() not in detail.lower():
-        line += f" Reason: {reason.rstrip('.')}."
-    conf = verdict.get("confidence")
-    if conf is not None:
-        line += f" Confidence: {int(conf)}%."
-    return line
+    return three_bullet(signals, action_label, from_to, rationale, confidence)
+
+
+def _archive_signals(v: dict) -> list[tuple]:
+    """Signal pairs for an archive comment: the verdict's own signals if present,
+    else a single assessment fact derived from its reason."""
+    s = v.get("signals")
+    if s:
+        return [tuple(x) if isinstance(x, (list, tuple)) else ("signal", x) for x in s]
+    return [("assessment", (v.get("reason") or "no longer needed").rstrip("."))]
 
 
 def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdicts, settings,
@@ -661,7 +671,11 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
                 new_labels.append(auto_id)
             mutator.set_labels(card.id, new_labels)
             mutator.add_comment(card.id, _action_comment(
-                ACTION_TIME_LABEL, f"Swapped stale label '{label}' to '{target}'", action))
+                ACTION_TIME_LABEL,
+                [("time_label", f"'{label}' on a card not in the matching list")],
+                action.get("reason") or "Workstream active & time-sensitive; swap to the matching tier.",
+                confidence=action.get("confidence"),
+                from_to=f"from '{label}' to '{target}'"))
             if not mutator.dry_run:
                 storage.record_action(db_path, now_iso, now_iso, g.TIER1, "label_swap",
                                       [card.id], {"old": label, "new": target}, "success")
@@ -686,7 +700,9 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
             remaining.append(auto_id)
         mutator.set_labels(card.id, remaining)
         mutator.add_comment(card.id, _action_comment(
-            ACTION_TIME_LABEL, f"Removed stale label '{label}'", action))
+            ACTION_TIME_LABEL, [("time_label", f"'{label}' stale (wrong list, applied long ago)")],
+            action.get("reason") or "Stale time label removed.",
+            confidence=action.get("confidence"), from_to=f"remove '{label}'"))
         if not mutator.dry_run:
             storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
                                   [card.id], {"label": label}, "success")
@@ -756,8 +772,11 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
             result.notes.append(f"In-scope archive deferred by cap: {cid}")
             continue
         ok = _archive_card(db_path, mutator, board, card, settings, now_iso, result,
-                           _action_comment(ACTION_ARCHIVE,
-                                           f"no longer needed; {archive_list_wording(settings)}", v),
+                           _action_comment(
+                               ACTION_ARCHIVE, _archive_signals(v),
+                               v.get("reason") or "No longer needed.",
+                               confidence=v.get("confidence"),
+                               from_to=f"to '{settings.archive_list_name}'"),
                            reason=v.get("reason") or "No longer needed")
         if not ok:
             continue
@@ -830,8 +849,10 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             # Tier 1 archive routes through the Agent Archive list (never hard-archive).
             if archive_list:
                 mutator.add_comment(card.id, _action_comment(
-                    ACTION_ARCHIVE,
-                    f"Recovered from {origin}; no longer needed, {archive_list_wording(settings)}", v))
+                    ACTION_ARCHIVE, [("origin", f"Scratch list {origin}")] + _archive_signals(v),
+                    v.get("reason") or f"Recovered from {origin}; no longer needed.",
+                    confidence=v.get("confidence"),
+                    from_to=f"to '{settings.archive_list_name}'"))
                 mutator.move_card(card.id, archive_list.id, position="top")
                 if not mutator.dry_run:
                     storage.add_archive_entry(db_path, card.id, now_iso)
@@ -855,8 +876,9 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             facts = _merge_action_facts(verdict, board, settings, in_scope)
             facts["type"] = "recovery_merge"
             if assign_tier(facts, settings) == g.TIER1 and board.card_by_id(target):
-                mutator.add_comment(
-                    card.id, f"{ACTION_RECOVER}: Recovered from {origin}; merged into active card.")
+                mutator.add_comment(card.id, _action_comment(
+                    ACTION_RECOVER, [("origin", f"Scratch list {origin}")],
+                    "Recovered and merged into an active card.", from_to=f"from {origin}"))
                 execute_merge(db_path, mutator, board, verdict, settings, now_iso, result)
                 if not mutator.dry_run:
                     storage.add_recovery(db_path, card.id, origin, "merge", now_iso)
@@ -894,7 +916,9 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             result.notes.append(f"Recovery {card.id} skipped: no destination list resolved")
             continue
 
-        mutator.add_comment(card.id, f"{ACTION_RECOVER}: Recovered from {origin} by grooming agent.")
+        mutator.add_comment(card.id, _action_comment(
+            ACTION_RECOVER, [("origin", f"Scratch list {origin}")],
+            "Pulled a buried card back into circulation.", from_to=f"from {origin} to '{disp_final}'"))
         mutator.move_card(card.id, dest_id)
         if not mutator.dry_run:
             storage.add_recovery(db_path, card.id, origin, disp_final, now_iso)
@@ -974,6 +998,11 @@ def _proposed_action_desc(action: dict, board) -> str:
         return f"{ACTION_ARCHIVE} (no longer needed)"
     if atype in ("dead_due_clear", "due_redate"):
         return f"{ACTION_FIX_DUE} (clear or re-date the long-overdue date)"
+    if atype == "backlog":
+        dest = action.get("dest_name")
+        if dest:
+            return f"{ACTION_BACKLOG} to '{dest}'"
+        return f"{ACTION_BACKLOG} (suggest creating 'Backlog - {action.get('topic', '<topic>')}')"
     if atype in ("reprioritize_up", "reprioritize_down"):
         dest = action.get("dest_name") or action.get("target_list") or "a fitting list"
         return f"{action_phrase(atype)}: move to {dest}"
@@ -1042,6 +1071,23 @@ def _execute_approved(db_path, mutator, board, action, settings, now_utc, now_is
             if target_lid not in new_labels:
                 new_labels.append(target_lid)
             mutator.set_labels(card.id, new_labels)
+    elif atype in ("reprioritize_up", "reprioritize_down"):
+        card = board.card_by_id(action["card_ids"][0])
+        dest = board.list_by_name(action.get("dest_name", ""))
+        if card and dest:
+            mutator.add_comment(card.id, f"Approved; moved to '{dest.name}'.")
+            mutator.move_card(card.id, dest.id, position="top")
+    elif atype == "backlog":
+        card = board.card_by_id(action["card_ids"][0])
+        dest = board.list_by_name(action.get("dest_name", "")) if action.get("dest_name") else None
+        if card and dest:
+            mutator.add_comment(card.id, f"Approved; moved to backlog list '{dest.name}'.")
+            mutator.move_card(card.id, dest.id, position="top")
+        elif card:
+            # suggest-create case: the user must create the list first.
+            mutator.add_comment(
+                card.id, f"Approved, but no '{settings.backlog_list_prefix} - "
+                         f"{action.get('topic', '')}' list exists yet — create it, then re-approve.")
 
 
 # ---------------------------------------------------------------------------
@@ -1052,26 +1098,38 @@ REPORT_CARD_PREFIX = "Grooming Report"
 REMINDER_CARD_TITLE = "Review agent spine: update Active Workstreams and People"
 
 
-def _proposal_comment(action: dict, board) -> str:
-    """Proposal comment in the canonical vocabulary layout.
+def _proposal_signals(action: dict, board) -> list[tuple]:
+    """(name, value) pairs for a proposal's bullet 1: the action's own signals if
+    it carries them, else a single fact derived from its type/reason."""
+    s = action.get("signals")
+    if s:
+        return [tuple(x) if isinstance(x, (list, tuple)) else ("signal", x) for x in s]
+    atype = action.get("type")
+    if atype == "merge":
+        survivor = board.card_by_id(action.get("survivor_id"))
+        return [("duplicate_of", survivor.name if survivor else action.get("survivor_id", ""))]
+    return [("assessment", (action.get("reason") or "review").rstrip("."))]
 
-    '<Action detail>. Reason: <one line>. Confidence: NN%. Reply ...' — leads with
-    the same vocabulary phrase used in the report and, for reprioritization moves
-    that contradict placement, prepends the placement-conflict note.
+
+def _proposal_comment(action: dict, board) -> str:
+    """Proposal comment in the canonical 3-bullet format (same as executed actions).
+
+    Bullet 3 folds in the placement-conflict reject note (when present) and the
+    reply instruction, so the comment stays exactly three bullets. Approval parsing
+    reads the USER's reply, so it is unaffected by this format.
     """
-    desc = _proposed_action_desc(action, board)
-    prefix = action.get("conflict_note")
-    line = (f"{prefix} " if prefix else "") + desc.rstrip(".") + "."
-    reason = action.get("reason")
-    if reason and reason.rstrip(".").lower() not in desc.lower():
-        line += f" Reason: {reason.rstrip('.')}."
-    conf = action.get("confidence")
-    if conf is not None:
-        line += f" Confidence: {int(conf)}%."
-    if action.get("conflict_note"):
-        line += " Reject if your placement stands."
-    line += " Reply 'yes'/'approve' to apply, 'no' or remove the label to reject."
-    return line
+    label = action_phrase(action.get("type"))
+    from_to = action.get("from_to")
+    if not from_to and action.get("type") in ("reprioritize_up", "reprioritize_down", "backlog") \
+            and action.get("dest_name"):
+        from_to = f"to '{action['dest_name']}'"
+    conflict = action.get("conflict_note")
+    rationale = action.get("reason") or "Agent proposal — review."
+    if conflict:
+        rationale += " Reject if your placement stands."
+    rationale += " Reply 'yes'/'approve' to apply, 'no' or remove the label to reject."
+    return three_bullet(_proposal_signals(action, board), label, from_to,
+                        rationale, action.get("confidence"), prefix=conflict or "")
 
 
 def _report_card_id(board, settings) -> str | None:

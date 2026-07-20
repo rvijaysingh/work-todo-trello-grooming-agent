@@ -133,7 +133,7 @@ def test_promotion_via_p0_label_executes(cfg, db_path):
     result, mut, tier2 = _run(db_path, board, v, cfg())
     assert tier2 == []
     assert _moves(mut) and _moves(mut)[0]["target_list_id"] == "L_today"
-    assert result.reprioritizations[0]["verified_signals"] == ["priority_label"]
+    assert result.reprioritizations[0]["verified_signals"] == ["existing_label_priority"]
 
 
 def test_promotion_via_due_in_window_executes(cfg, db_path):
@@ -306,7 +306,7 @@ def test_demotion_comment_names_placement_conflict(cfg, db_path):
     _, mut, tier2 = _run(db_path, board, v, s)
     text = "\n".join(_comments(mut))
     assert "You placed this on Today" in text
-    assert "Mark Less Time-sensitive: move to Next Few Days" in text
+    assert "[Decrease Time-Sensitivity]" in text and "to 'Next Few Days'" in text
     assert "Reject if your placement stands." in text
     assert "Confidence: 82%" in text
 
@@ -317,7 +317,7 @@ def test_promotion_comment_uses_vocabulary(cfg, db_path):
           "signals": ["priority_label"], "confidence": 88, "reason": "P0."}]
     _, mut, tier2 = _run(db_path, board, v, cfg())
     text = "\n".join(_comments(mut))
-    assert "Mark More Time-sensitive: move to Today" in text and "Confidence: 88%" in text
+    assert "[Increase Time-Sensitivity]" in text and "to 'Today'" in text and "Confidence: 88%" in text
 
 
 # ── Config renames: new name AND old alias, incl. Notion override ───────────
@@ -377,8 +377,8 @@ def test_today_plan_renders_first_with_moves(cfg, db_path):
     text = _report(result, board, cfg())
     assert text.index("== Today plan ==") < text.index("== Still overdue")
     assert "Today: 23 cards, target 15 — 1 moved automatically, 0 proposed" in text
-    assert "Mark More Time-sensitive: move to Today" in text
-    assert "Verified signals: priority_label" in text
+    assert "Increase Time-Sensitivity: move to Today" in text
+    assert "existing_label_priority" in text
 
 
 def test_today_plan_empty_state(cfg, db_path):
@@ -397,7 +397,7 @@ def test_today_plan_dry_run_uses_would(cfg, db_path):
          "signals": ["priority_label"], "confidence": 88}], cfg())
     text = _report(result, board, cfg(), dry_run=True)
     assert "would move automatically" in text
-    assert "Would: Mark More Time-sensitive: move to Today" in text
+    assert "Would: Increase Time-Sensitivity: move to Today" in text
 
 
 def test_at_a_glance_includes_today_plan_counts(cfg, db_path):
@@ -426,7 +426,7 @@ def test_build_candidates_promotion_prefilter(cfg, db_path):
     mut = ex.BoardMutator(None, dry_run=True)
     cands = repri.build_candidates(board, mut, _spine(), cfg(), NOW)
     ids = [c["id"] for c in cands["promote"]]
-    assert ids == ["p"] and "priority_label" in cands["promote"][0]["verified_signals"]
+    assert ids == ["p"] and any(x["name"]=="existing_label_priority" for x in cands["promote"][0]["verified_signals"])
 
 
 def test_build_candidates_promote_shortlist_capped(cfg, db_path):
@@ -438,7 +438,7 @@ def test_build_candidates_promote_shortlist_capped(cfg, db_path):
     mut = ex.BoardMutator(None, dry_run=True)
     cands = repri.build_candidates(board, mut, _spine(), cfg(max_reprioritization_moves_per_run=3), NOW)
     assert len(cands["promote"]) == 6  # min(2*3, 25)
-    assert all("priority_label" in c["verified_signals"] for c in cands["promote"])
+    assert all(any(x["name"]=="existing_label_priority" for x in c["verified_signals"]) for c in cands["promote"])
 
 
 def test_build_candidates_promote_ranks_strongest_first(cfg, db_path):
@@ -478,7 +478,7 @@ def test_over_target_yields_demotion_end_to_end(cfg, db_path, tmp_path):
                 + [{"card_id": f"c{i}", "verdict": "keep", "reason": "active"} for i in range(1, 30)])
     result, text, _ = _pipeline(board, cfg(today_list_target=15), db_path, tmp_path, verdicts)
     assert any(r["card_id"] == "c0" for r in result.reprioritizations)
-    assert "Mark Less Time-sensitive: move to Next Few Days" in text
+    assert "Decrease Time-Sensitivity: move to Next Few Days" in text  # report layout
 
 
 def test_keep_everything_surfaces_silent_zero_in_health(cfg, db_path, tmp_path):

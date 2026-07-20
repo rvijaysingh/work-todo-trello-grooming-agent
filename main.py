@@ -119,7 +119,7 @@ def resolve_ids_or_fail(board: BoardView, settings) -> None:
 
 def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
                  llm=None, prompts=None, spine=None, trello=None, judgments=None,
-                 notion_notes=None, spine_ok=True):
+                 notion_notes=None, spine_ok=True, run_mode=None):
     """Run phases 1–5 over an already-fetched board. Returns (result, report_text).
 
     judgments (optional): {'clusters': [...], 'hygiene': [...], 'recovery': [...]}
@@ -137,9 +137,18 @@ def run_pipeline(board, settings, db_path, now_utc, dry_run, first_run,
     prev_snapshot = storage.get_snapshot(db_path, prev_run_id) if prev_run_id else {}
     prior_actions = storage.get_actions(db_path, run_id=prev_run_id) if prev_run_id else []
 
+    # run_mode governs writes: dry_run (nothing), limited_test (top N real per type,
+    # rest simulated), live (all real). A bare dry_run flag maps to dry_run/live.
+    if run_mode is None:
+        run_mode = "dry_run" if dry_run else "live"
+    dry_run = run_mode == "dry_run"   # run-level flag (snapshot/kv/report wording)
+
     result = ex.ExecutionResult()
     result.notion_notes = list(notion_notes or [])
-    mutator = ex.BoardMutator(trello, dry_run)
+    result.run_mode = run_mode
+    result.limited_per_type = settings.limited_test_actions_per_type
+    mutator = ex.BoardMutator(trello, run_mode=run_mode,
+                              limited_per_type=settings.limited_test_actions_per_type)
 
     # Ensure the single Agent Archive list exists (auto-created, positioned last).
     archive_list = ex.ensure_archive_list(board, settings, mutator)
@@ -582,11 +591,18 @@ def run(argv=None) -> int:
         notion_notes, dry_run_from_notion = apply_notion_overrides(settings, spine)
         if dry_run_from_notion:
             logger.info("dry_run set to true by the Notion Rules section")
-        dry_run = settings.dry_run or args.dry_run or dry_run_from_notion
+
+        # run_mode governs execution; --dry-run and a Notion dry_run always force
+        # dry_run regardless of run_mode.
+        effective_run_mode = settings.run_mode
+        if args.dry_run or dry_run_from_notion:
+            effective_run_mode = "dry_run"
+        dry_run = effective_run_mode == "dry_run"
+        logger.info("Run mode: %s", effective_run_mode)
 
         run_pipeline(board, settings, settings.db_path, now_utc, dry_run, first_run,
                      llm=llm, prompts=prompts, spine=spine, trello=trello,
-                     notion_notes=notion_notes, spine_ok=spine_ok)
+                     notion_notes=notion_notes, spine_ok=spine_ok, run_mode=effective_run_mode)
         storage.record_success(settings.db_path, now_iso)
         logger.info("Run complete (dry_run=%s)", dry_run)
         return 0

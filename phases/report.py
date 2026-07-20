@@ -123,6 +123,13 @@ def _card(board, card_id):
     return board.card_by_id(card_id) if card_id else None
 
 
+def _real_tag(entry: dict, limited: bool) -> str:
+    """'[REAL] ' / '[simulated] ' tag for a limited-live-test entry (else '')."""
+    if not limited:
+        return ""
+    return "[REAL] " if entry.get("real") else "[simulated] "
+
+
 def _entry_header(num_label: str, title: str, due_iso, settings) -> str:
     title = (title or "(untitled)").strip()
     due = _fmt_due(due_iso, settings)
@@ -186,9 +193,16 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
     n_auto = len(auto_entries) + (1 if result.reminder_created else 0)
     today_plan = getattr(result, "today_plan", None) or {}
 
+    run_mode = getattr(result, "run_mode", "dry_run")
+    limited = run_mode == "limited_test"
+
     # Header + at-a-glance --------------------------------------------------
     lines.append(f"{REPORT_CARD_PREFIX} — {now_iso}")
-    lines.append(f"Mode: {'DRY-RUN (no board changes)' if dry_run else 'LIVE'}")
+    if limited:
+        lines.append(f"Mode: LIMITED LIVE TEST — up to {getattr(result, 'limited_per_type', 2)} "
+                     "real actions per type; everything else simulated")
+    else:
+        lines.append(f"Mode: {'DRY-RUN (no board changes)' if dry_run else 'LIVE'}")
     if getattr(result, "spine_unreadable", False):
         lines.append("")
         lines.append("!!! SPINE UNREADABLE — archiving, label, date, and reprioritization "
@@ -211,17 +225,17 @@ def build_report(result, board, settings, now_iso, dry_run, first_run,
         lines.append(_ARCHIVE_REMINDER)
         lines.append("")
 
-    _section_today_plan(lines, result, board, settings, dry_run)
+    _section_today_plan(lines, result, board, settings, dry_run, limited)
     _section_still_overdue(lines, result, board, settings)
     _section_awaiting(lines, result, board, settings, now_iso)
-    _section_recently_archived(lines, result, board, settings, dry_run)
-    _section_done_automatically(lines, result, board, settings, dry_run, auto_entries, n_auto)
+    _section_recently_archived(lines, result, board, settings, dry_run, limited)
+    _section_done_automatically(lines, result, board, settings, dry_run, auto_entries, n_auto, limited)
     _section_health(lines, result, settings, stats, approval_rates, prev_stats, notion_notes)
 
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _section_today_plan(lines, result, board, settings, dry_run):
+def _section_today_plan(lines, result, board, settings, dry_run, limited=False):
     """Reprioritization summary — rendered FIRST (before 'Still overdue').
 
     Shows current list sizes vs targets, each executed Mark More/Less
@@ -264,7 +278,7 @@ def _section_today_plan(lines, result, board, settings, dry_run):
             conf = m.get("confidence")
             conf_s = f" Confidence: {int(conf)}%." if conf is not None else ""
             block = [_entry_header(f"#{i}", title, card.due if card else None, settings),
-                     f"{verb}: {action}: move to {m.get('dest', '?')}. "
+                     f"{verb}: {_real_tag(m, limited)}{action}: move to {m.get('dest', '?')}. "
                      f"Verified signals: {sigs}.{conf_s}"]
             block.extend(_labels_desc(card))
             blocks.append(block)
@@ -362,7 +376,7 @@ def _proposal_action_line(p, settings, now_iso) -> str:
     return " ".join(parts)
 
 
-def _section_recently_archived(lines, result, board, settings, dry_run):
+def _section_recently_archived(lines, result, board, settings, dry_run, limited=False):
     verb_move = "would move" if dry_run else "moved"
     lines.append(f"== Recently archived ({len(result.recently_archived)}) ==")
     lines.append(f"({verb_move} to the Agent Archive list — visible {settings.archive_list_days} "
@@ -377,13 +391,14 @@ def _section_recently_archived(lines, result, board, settings, dry_run):
         card = _card(board, a.get("card_id"))
         title = a.get("name") or (card.name if card else a.get("card_id"))
         block = [_entry_header(f"#{i}", title, card.due if card else None, settings),
-                 f"Reason: {(a.get('reason') or a.get('note') or 'Archived').rstrip('.')}."]
+                 f"Reason: {_real_tag(a, limited)}{(a.get('reason') or a.get('note') or 'Archived').rstrip('.')}."]
         block.extend(_labels_desc(card))
         blocks.append(block)
     _flush(lines, blocks)
 
 
-def _section_done_automatically(lines, result, board, settings, dry_run, auto_entries, n_auto):
+def _section_done_automatically(lines, result, board, settings, dry_run, auto_entries, n_auto,
+                                limited=False):
     lines.append(f"== Done automatically ({n_auto}) ==")
     if n_auto == 0:
         lines.append("(none)")
@@ -409,12 +424,13 @@ def _section_done_automatically(lines, result, board, settings, dry_run, auto_en
         blocks = []
         for a in items:
             counter += 1
-            blocks.append(_done_block(counter, a, board, settings, dry_run))
+            blocks.append(_done_block(counter, a, board, settings, dry_run, limited))
         _flush(lines, blocks)
 
 
-def _done_block(num, a, board, settings, dry_run) -> list[str]:
+def _done_block(num, a, board, settings, dry_run, limited=False) -> list[str]:
     verb = "Would" if dry_run else "Did"
+    tag = _real_tag(a, limited)
     if a.get("type") == "reminder_created":
         return [f"#{num} Card Name: Weekly spine-review reminder card",
                 f"{verb}: create the weekly spine-review reminder card"]
@@ -422,7 +438,7 @@ def _done_block(num, a, board, settings, dry_run) -> list[str]:
     card = _card(board, cid)
     title = (card.name if card else None) or cid or "(action)"
     block = [_entry_header(f"#{num}", title, card.due if card else None, settings),
-             f"{verb}: {_auto_phrase(a, board, settings)}"]
+             f"{verb}: {tag}{_auto_phrase(a, board, settings)}"]
     block.extend(_labels_desc(card))
     return block
 

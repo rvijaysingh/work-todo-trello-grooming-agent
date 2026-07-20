@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import guardrails as g
@@ -57,16 +58,50 @@ def is_duplicate_archive_reason(reason: str | None) -> bool:
 # ---------------------------------------------------------------------------
 
 class BoardMutator:
-    """The single seam for board writes. In dry-run it performs NO Trello calls.
+    """The single seam for board writes, aware of the run mode.
 
-    Every call is appended to `self.log` (op name + kwargs) for the report and
-    for test assertions, regardless of mode.
+    - dry_run: performs NO Trello calls and persists nothing.
+    - live: every action is real.
+    - limited_test: only the first `limited_per_type` actions of each action TYPE
+      execute for real (the rest are simulated); proposals and infra writes are
+      always real.
+
+    `self.dry_run` is the PER-ACTION simulate flag — set for the duration of an
+    `action(atype)` block, otherwise the base flag — so the existing
+    `if not mutator.dry_run:` persistence guards read the correct per-action value
+    with no change. Every call is appended to `self.log` regardless of mode.
     """
 
-    def __init__(self, trello_client, dry_run: bool):
+    def __init__(self, trello_client, dry_run: bool | None = None,
+                 run_mode: str | None = None, limited_per_type: int = 2):
         self.trello = trello_client
-        self.dry_run = dry_run
+        self.run_mode = run_mode or ("dry_run" if dry_run else "live")
+        self.limited_per_type = limited_per_type
+        self._budget: dict[str, int] = {}
+        self._base_dry = self.run_mode == "dry_run"
+        self.dry_run = self._base_dry   # per-action flag; starts at the base
         self.log: list[dict] = []
+
+    def _decide_real(self, atype: str, limited: bool) -> bool:
+        if self.run_mode == "dry_run":
+            return False
+        if self.run_mode == "live" or not limited:
+            return True
+        used = self._budget.get(atype, 0)   # limited_test: top N per type
+        if used < self.limited_per_type:
+            self._budget[atype] = used + 1
+            return True
+        return False
+
+    @contextmanager
+    def action(self, atype: str, limited: bool = True):
+        """Scope a single action's writes; yields whether it executes for real."""
+        real = self._decide_real(atype, limited)
+        self.dry_run = not real
+        try:
+            yield real
+        finally:
+            self.dry_run = self._base_dry
 
     def _record(self, op: str, **kwargs) -> None:
         self.log.append({"op": op, **kwargs})
@@ -141,6 +176,8 @@ class ExecutionResult:
     expired_proposals: list = field(default_factory=list)
     reminder_created: bool = False
     spine_unreadable: bool = False                           # spine read failed → degraded run
+    run_mode: str = "dry_run"                                # dry_run | limited_test | live
+    limited_per_type: int = 2                                # real actions per type in limited_test
     notion_notes: list = field(default_factory=list)         # Notion Rules override notes
     notes: list = field(default_factory=list)
     counters: dict = field(default_factory=dict)
@@ -416,6 +453,8 @@ def execute_merges(db_path, mutator, board, verdicts, settings, now_utc, now_iso
         v["_tier"] = tier
         (tier1 if tier == g.TIER1 else tier2).append(v)
 
+    # Highest-confidence first so limited_test executes the strongest N merges real.
+    tier1.sort(key=lambda v: v.get("confidence") or 0, reverse=True)
     allowed, deferred = g.apply_cap(tier1, settings.max_merges_per_run)
     for v in deferred:
         result.notes.append(f"Merge deferred by cap: survivor {v.get('survivor_id')}")
@@ -426,7 +465,12 @@ def execute_merges(db_path, mutator, board, verdicts, settings, now_utc, now_iso
         if g.is_never_touch(survivor, now_utc, settings, in_scope, open_proposed, protected):
             result.notes.append(f"Merge skipped (never-touch): {survivor.id}")
             continue
-        execute_merge(db_path, mutator, board, v, settings, now_iso, result)
+        with mutator.action("merge") as real:
+            if execute_merge(db_path, mutator, board, v, settings, now_iso, result):
+                if result.applied and result.applied[-1].get("type") == "merge":
+                    result.applied[-1]["real"] = real
+                for entry in result.recently_archived:
+                    entry.setdefault("real", real)
     result.counters["merges"] = sum(1 for a in result.applied if a["type"] == "merge")
     return tier2
 
@@ -503,16 +547,18 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
     for v in allowed:
         card = board.card_by_id(v["card_id"])
         old_name = card.name
-        _apply_rename(mutator, board, card, v["new_name"], v.get("new_desc"), auto_id, settings)
-        mutator.add_comment(card.id, _action_comment(
-            ACTION_RENAME, [("name_quality", f"unclear title '{old_name}'")],
-            v.get("reason") or "Rewritten per the card naming standard.",
-            confidence=v.get("confidence"),
-            from_to=f"from '{old_name}' to '{v['new_name']}'"))
-        if not mutator.dry_run:
-            storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
-                                  {"new_name": v["new_name"], "original_name": old_name}, "success")
-        result.applied.append({"type": "rename", "card_id": card.id, "new_name": v["new_name"]})
+        with mutator.action("rename") as real:
+            _apply_rename(mutator, board, card, v["new_name"], v.get("new_desc"), auto_id, settings)
+            mutator.add_comment(card.id, _action_comment(
+                ACTION_RENAME, [("name_quality", f"unclear title '{old_name}'")],
+                v.get("reason") or "Rewritten per the card naming standard.",
+                confidence=v.get("confidence"),
+                from_to=f"from '{old_name}' to '{v['new_name']}'"))
+            if real:
+                storage.record_action(db_path, now_iso, now_iso, g.TIER1, "rename", [card.id],
+                                      {"new_name": v["new_name"], "original_name": old_name}, "success")
+            result.applied.append({"type": "rename", "card_id": card.id,
+                                   "new_name": v["new_name"], "real": real})
 
     # -- Dead-due handling --------------------------------------------------
     # Every dead-due in-scope card must resolve to an escalation OR a fix — never
@@ -560,31 +606,33 @@ def execute_hygiene(db_path, mutator, board, hygiene_verdicts, flagged_ids, sett
             continue
         if not touchable(cid):
             continue
-        if redate:
-            mutator.add_comment(cid, _action_comment(
-                ACTION_FIX_DUE,
-                [("due_status", f"dead — old due date was {card.due}"),
-                 ("written_date", f"{new_due} (from card/spine text)")],
-                v.get("reason") or "Re-dated from a written source.",
-                confidence=v.get("confidence"),
-                from_to=f"from {card.due} to {new_due}"))
-            mutator.set_due(cid, new_due)
-            atype = "due_redate"
-        else:
-            mutator.add_comment(cid, _action_comment(
-                ACTION_FIX_DUE,
-                [("due_status", f"dead — old due date was {card.due}"),
-                 ("written_date", "none found")],
-                v.get("reason") or "Cleared a long-past due date (nothing left to do).",
-                confidence=v.get("confidence")))
-            mutator.clear_due(cid)
-            atype = "dead_due_clear"
-        # Date fixes are label-neutral by design: they never add or remove labels
-        # (only the old date is noted in a comment).
-        if not mutator.dry_run:
-            storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
-                                  {"original_due": card.due, "new_due": new_due if redate else None}, "success")
-        result.applied.append({"type": atype, "card_id": cid, "new_due": new_due if redate else None})
+        with mutator.action("due") as real:
+            if redate:
+                mutator.add_comment(cid, _action_comment(
+                    ACTION_FIX_DUE,
+                    [("due_status", f"dead — old due date was {card.due}"),
+                     ("written_date", f"{new_due} (from card/spine text)")],
+                    v.get("reason") or "Re-dated from a written source.",
+                    confidence=v.get("confidence"),
+                    from_to=f"from {card.due} to {new_due}"))
+                mutator.set_due(cid, new_due)
+                atype = "due_redate"
+            else:
+                mutator.add_comment(cid, _action_comment(
+                    ACTION_FIX_DUE,
+                    [("due_status", f"dead — old due date was {card.due}"),
+                     ("written_date", "none found")],
+                    v.get("reason") or "Cleared a long-past due date (nothing left to do).",
+                    confidence=v.get("confidence")))
+                mutator.clear_due(cid)
+                atype = "dead_due_clear"
+            # Date fixes are label-neutral by design: they never add/remove labels.
+            if real:
+                storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
+                                      {"original_due": card.due, "new_due": new_due if redate else None},
+                                      "success")
+            result.applied.append({"type": atype, "card_id": cid,
+                                   "new_due": new_due if redate else None, "real": real})
 
     # Safety net: any overdue in-scope card the LLM did not classify is escalated,
     # not silently dropped (but a card claimed by merge/archive is not escalated).
@@ -664,23 +712,24 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
                 continue
             if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected):
                 continue
-            new_labels = [x for x in card.label_ids if x != old_lid]
-            if target_lid not in new_labels:
-                new_labels.append(target_lid)
-            if auto_id and auto_id not in new_labels:
-                new_labels.append(auto_id)
-            mutator.set_labels(card.id, new_labels)
-            mutator.add_comment(card.id, _action_comment(
-                ACTION_TIME_LABEL,
-                [("time_label", f"'{label}' on a card not in the matching list")],
-                action.get("reason") or "Workstream active & time-sensitive; swap to the matching tier.",
-                confidence=action.get("confidence"),
-                from_to=f"from '{label}' to '{target}'"))
-            if not mutator.dry_run:
-                storage.record_action(db_path, now_iso, now_iso, g.TIER1, "label_swap",
-                                      [card.id], {"old": label, "new": target}, "success")
-            result.applied.append({"type": "label_swap", "card_id": card.id,
-                                   "label": label, "target_label": target})
+            with mutator.action("label") as real:
+                new_labels = [x for x in card.label_ids if x != old_lid]
+                if target_lid not in new_labels:
+                    new_labels.append(target_lid)
+                if auto_id and auto_id not in new_labels:
+                    new_labels.append(auto_id)
+                mutator.set_labels(card.id, new_labels)
+                mutator.add_comment(card.id, _action_comment(
+                    ACTION_TIME_LABEL,
+                    [("time_label", f"'{label}' on a card not in the matching list")],
+                    action.get("reason") or "Workstream active & time-sensitive; swap to the matching tier.",
+                    confidence=action.get("confidence"),
+                    from_to=f"from '{label}' to '{target}'"))
+                if real:
+                    storage.record_action(db_path, now_iso, now_iso, g.TIER1, "label_swap",
+                                          [card.id], {"old": label, "new": target}, "success")
+                result.applied.append({"type": "label_swap", "card_id": card.id,
+                                       "label": label, "target_label": target, "real": real})
             continue
 
         # (c) Remove.
@@ -695,18 +744,20 @@ def execute_label_dispositions(db_path, mutator, board, stale_pairs, label_verdi
             continue
         if g.is_never_touch(card, now_utc, settings, in_scope, open_proposed, protected) or not old_lid:
             continue
-        remaining = [x for x in card.label_ids if x != old_lid]
-        if auto_id and auto_id not in remaining:
-            remaining.append(auto_id)
-        mutator.set_labels(card.id, remaining)
-        mutator.add_comment(card.id, _action_comment(
-            ACTION_TIME_LABEL, [("time_label", f"'{label}' stale (wrong list, applied long ago)")],
-            action.get("reason") or "Stale time label removed.",
-            confidence=action.get("confidence"), from_to=f"remove '{label}'"))
-        if not mutator.dry_run:
-            storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
-                                  [card.id], {"label": label}, "success")
-        result.applied.append({"type": "stale_label_removal", "card_id": card.id, "label": label})
+        with mutator.action("label") as real:
+            remaining = [x for x in card.label_ids if x != old_lid]
+            if auto_id and auto_id not in remaining:
+                remaining.append(auto_id)
+            mutator.set_labels(card.id, remaining)
+            mutator.add_comment(card.id, _action_comment(
+                ACTION_TIME_LABEL, [("time_label", f"'{label}' stale (wrong list, applied long ago)")],
+                action.get("reason") or "Stale time label removed.",
+                confidence=action.get("confidence"), from_to=f"remove '{label}'"))
+            if real:
+                storage.record_action(db_path, now_iso, now_iso, g.TIER1, "stale_label_removal",
+                                      [card.id], {"label": label}, "success")
+            result.applied.append({"type": "stale_label_removal", "card_id": card.id,
+                                   "label": label, "real": real})
     return tier2
 
 
@@ -747,6 +798,8 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
     tier2 = []
     archived_ids: set[str] = set()
 
+    # Highest-confidence first so limited_test executes the strongest N for real.
+    archive_verdicts = sorted(archive_verdicts, key=lambda v: v.get("confidence") or 0, reverse=True)
     for v in archive_verdicts:
         cid = v["card_id"]
         if cid in skip_ids:
@@ -771,21 +824,25 @@ def execute_inscope_archive(db_path, mutator, board, archive_verdicts, settings,
         if executed >= settings.max_inscope_archives_per_run:
             result.notes.append(f"In-scope archive deferred by cap: {cid}")
             continue
-        ok = _archive_card(db_path, mutator, board, card, settings, now_iso, result,
-                           _action_comment(
-                               ACTION_ARCHIVE, _archive_signals(v),
-                               v.get("reason") or "No longer needed.",
-                               confidence=v.get("confidence"),
-                               from_to=f"to '{settings.archive_list_name}'"),
-                           reason=v.get("reason") or "No longer needed")
-        if not ok:
-            continue
-        if not mutator.dry_run:
-            storage.record_action(db_path, now_iso, now_iso, g.TIER1, "inscope_archive",
-                                  [cid], {"reason": v.get("reason")}, "success")
-        result.applied.append({"type": "inscope_archive", "card_id": cid, "reason": v.get("reason")})
-        archived_ids.add(cid)
-        executed += 1
+        with mutator.action("archive") as real:
+            ok = _archive_card(db_path, mutator, board, card, settings, now_iso, result,
+                               _action_comment(
+                                   ACTION_ARCHIVE, _archive_signals(v),
+                                   v.get("reason") or "No longer needed.",
+                                   confidence=v.get("confidence"),
+                                   from_to=f"to '{settings.archive_list_name}'"),
+                               reason=v.get("reason") or "No longer needed")
+            if not ok:
+                continue
+            if real:
+                storage.record_action(db_path, now_iso, now_iso, g.TIER1, "inscope_archive",
+                                      [cid], {"reason": v.get("reason")}, "success")
+            result.applied.append({"type": "inscope_archive", "card_id": cid,
+                                   "reason": v.get("reason"), "real": real})
+            if result.recently_archived:
+                result.recently_archived[-1]["real"] = real
+            archived_ids.add(cid)
+            executed += 1
 
     result.counters["inscope_archives"] = executed
     return tier2, archived_ids
@@ -916,16 +973,18 @@ def execute_recovery(db_path, mutator, board, recovery_verdicts, settings, now_i
             result.notes.append(f"Recovery {card.id} skipped: no destination list resolved")
             continue
 
-        mutator.add_comment(card.id, _action_comment(
-            ACTION_RECOVER, [("origin", f"Scratch list {origin}")],
-            "Pulled a buried card back into circulation.", from_to=f"from {origin} to '{disp_final}'"))
-        mutator.move_card(card.id, dest_id)
-        if not mutator.dry_run:
-            storage.add_recovery(db_path, card.id, origin, disp_final, now_iso)
-        result.recoveries.append({"card_id": card.id, "disposition": disp_final})
-        dest_name = board.list_by_id(dest_id).name if board.list_by_id(dest_id) else disp_final
-        result.applied.append({"type": "recovery_route", "card_id": card.id,
-                               "origin": origin, "dest": dest_name})
+        with mutator.action("recover") as real:
+            mutator.add_comment(card.id, _action_comment(
+                ACTION_RECOVER, [("origin", f"Scratch list {origin}")],
+                "Pulled a buried card back into circulation.",
+                from_to=f"from {origin} to '{disp_final}'"))
+            mutator.move_card(card.id, dest_id)
+            if real:
+                storage.add_recovery(db_path, card.id, origin, disp_final, now_iso)
+            result.recoveries.append({"card_id": card.id, "disposition": disp_final})
+            dest_name = board.list_by_id(dest_id).name if board.list_by_id(dest_id) else disp_final
+            result.applied.append({"type": "recovery_route", "card_id": card.id,
+                                   "origin": origin, "dest": dest_name, "real": real})
         executed += 1
 
     result.counters["recoveries"] = executed
@@ -956,14 +1015,14 @@ def generate_proposals(db_path, mutator, board, tier2_actions, settings, now_iso
             continue
         anchor = action.get("anchor_card_id", card_ids[0])
         card = board.card_by_id(anchor)
-        if card and proposed_id:
-            _add_label(mutator, card, proposed_id)
-            mutator.add_comment(anchor, _proposal_comment(action, board))
-        if mutator.dry_run:
-            pid = 0
-        else:
+        # Proposals are always real (they create an Agent: Proposed card) except in
+        # dry_run — in limited_test they are not subject to the per-type real budget.
+        with mutator.action("proposal", limited=False) as real:
+            if card and proposed_id:
+                _add_label(mutator, card, proposed_id)
+                mutator.add_comment(anchor, _proposal_comment(action, board))
             pid = storage.add_proposal(db_path, now_iso, fp, card_ids, action,
-                                       action.get("reason", ""), now_iso)
+                                       action.get("reason", ""), now_iso) if real else 0
         result.proposals_opened.append({
             "proposal_id": pid, "fingerprint": fp, "type": action["type"],
             "card_id": anchor,

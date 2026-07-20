@@ -73,6 +73,42 @@ def _shared_entity_keyword(a, b, entity_keywords: set[str]) -> bool:
     return False
 
 
+import re as _re
+
+# The Granola agent writes a "**Source meeting:** <meeting>" line into descriptions;
+# two cards from the same meeting are strong duplicate candidates even when their
+# titles differ (e.g. "Circle back with Cody after Priscilla conversation" vs
+# "• Cody - circle back"). Dedup blocking compares this line and the description
+# body, not just titles (July-19 report fix 2c).
+_SOURCE_MEETING_RE = _re.compile(r"\*\*Source meeting:\*\*\s*([^\n*]+)", _re.IGNORECASE)
+
+
+def _source_meeting(card) -> str:
+    m = _SOURCE_MEETING_RE.search(card.desc or "")
+    return m.group(1).strip().lower() if m else ""
+
+
+def _shared_source_meeting(a, b) -> bool:
+    sa, sb = _source_meeting(a), _source_meeting(b)
+    return bool(sa) and sa == sb
+
+
+def _desc_jaccard(a, b) -> float:
+    ta, tb = normalize_tokens(a.desc or ""), normalize_tokens(b.desc or "")
+    if not ta or not tb:
+        return 0.0
+    inter, union = ta & tb, ta | tb
+    return len(inter) / len(union) if union else 0.0
+
+
+def _content_linked(a, b, settings) -> bool:
+    """True if two cards' descriptions / source-meeting lines make them duplicate
+    candidates, independent of their titles."""
+    if _shared_source_meeting(a, b):
+        return True
+    return _desc_jaccard(a, b) >= settings.narrow_hint_jaccard
+
+
 # ---------------------------------------------------------------------------
 # Narrow track (in-scope)
 # ---------------------------------------------------------------------------
@@ -90,6 +126,8 @@ def narrow_track(in_scope_cards, entity_keywords: set[str], settings) -> dict:
         if person_labels(a, settings) & person_labels(b, settings):
             return True
         if _shared_entity_keyword(a, b, entity_keywords):
+            return True
+        if _content_linked(a, b, settings):  # description / source-meeting match
             return True
         return False
 
@@ -140,6 +178,8 @@ def wide_track(in_scope_cards, wide_cards, entity_keywords: set[str], settings) 
             if jaccard(a.name, b.name) >= settings.wide_block_jaccard:
                 block = True
             elif _shared_entity_keyword(a, b, entity_keywords) and (a_people & person_labels(b, settings)):
+                block = True
+            elif _content_linked(a, b, settings):  # description / source-meeting match
                 block = True
             if block:
                 pairs.append({"a": a, "b": b})

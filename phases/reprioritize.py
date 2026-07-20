@@ -696,26 +696,28 @@ def run_reprioritization(db_path, mutator, board, verdicts, settings, spine,
         # --- Execute (Tier 1) — 3-bullet comment ---------------------------
         action_label = ACTION_INCREASE if direction == "up" else ACTION_DECREASE
         rationale = reason + (" Reject if your placement stands." if conflict else "")
-        mutator.add_comment(cid, three_bullet(sig_pairs, action_label, from_to,
-                                              rationale, conf, prefix=conflict or ""))
-        mutator.move_card(cid, dest_id, position="top")
+        gate_type = "increase" if direction == "up" else "decrease"
+        with mutator.action(gate_type) as real:
+            mutator.add_comment(cid, three_bullet(sig_pairs, action_label, from_to,
+                                                  rationale, conf, prefix=conflict or ""))
+            mutator.move_card(cid, dest_id, position="top")
 
-        label_ids = _apply_label_change_ids(list(card.label_ids), v.get("label_change") or {}, board)
-        if auto_id and auto_id not in label_ids:
-            label_ids.append(auto_id)
-        if label_ids != card.label_ids:
-            mutator.set_labels(cid, label_ids)
+            label_ids = _apply_label_change_ids(list(card.label_ids), v.get("label_change") or {}, board)
+            if auto_id and auto_id not in label_ids:
+                label_ids.append(auto_id)
+            if label_ids != card.label_ids:
+                mutator.set_labels(cid, label_ids)
 
-        if not mutator.dry_run:
-            storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
-                                  {"direction": direction, "dest": dest_name,
-                                   "verified_signals": verified}, "success")
-        result.applied.append({"type": atype, "card_id": cid, "dest": dest_name,
-                               "direction": direction})
-        result.reprioritizations.append({
-            "card_id": cid, "name": card.name, "direction": direction, "dest": dest_name,
-            "verified_signals": verified, "confidence": conf, "reason": reason,
-            "signals": sig_pairs})
+            if real:
+                storage.record_action(db_path, now_iso, now_iso, g.TIER1, atype, [cid],
+                                      {"direction": direction, "dest": dest_name,
+                                       "verified_signals": verified}, "success")
+            result.applied.append({"type": atype, "card_id": cid, "dest": dest_name,
+                                   "direction": direction, "real": real})
+            result.reprioritizations.append({
+                "card_id": cid, "name": card.name, "direction": direction, "dest": dest_name,
+                "verified_signals": verified, "confidence": conf, "reason": reason,
+                "signals": sig_pairs, "real": real})
         executed += 1
         eff[cid] = dest_id
         if direction == "down":
